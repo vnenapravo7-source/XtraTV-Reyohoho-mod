@@ -56,7 +56,7 @@ Further candidates, not removed: offline/download services and local playback; D
 voice search; advanced chat rewards/polls/7TV effects; alternate MediaPlayer backend. Removing unused
 code primarily simplifies maintenance/size; idle features need profiling before claiming a speedup.
 
-## Repository-ready build (147)
+## Repository-ready build (150)
 
 Download services, download screens/actions, local-file import and offline playback entry points are removed.
 Bookmarks and saved filters remain; legacy Room tables remain to preserve existing databases.
@@ -64,11 +64,19 @@ SavedTabPolicy migrates old download-tab selections (five regression tests).
 Stream previews and parallel-player cuts from 144 remain. Animated emotes are still disabled.
 The upstream updater entry points are disabled; updates must come from this mod's own releases.
 
-The focus spring is removed, reducing UI frames (one key: 9 -> 2 in short sequential TCL samples),
-but frame latency did not improve reliably. A native RecyclerView choice-panel experiment was
+The focus spring is removed to avoid unnecessary work after a focus change.
+No reliable improvement in frame latency has been established. Some early measurements did not
+capture panel visibility and must not be used for before/after comparisons. A native RecyclerView choice-panel experiment was
 measured and reverted because it did not help; it is not part of the final source.
 Further profiling is needed before claiming the remaining focus latency is fixed.
 
 Optimized and release builds accept -PtargetAbi=armeabi-v7a/arm64-v8a/x86/x86_64; one ABI per APK.
 Production signing is separate from the public development key. GitHub workflows build test artifacts
 and create a manually triggered signed draft release. No GitHub repository/release was published here.
+
+Four UI optimizations are batched in 150 for one combined device verification: focus shadows removed
+from home cards (white focus border retained), duplicate blurred avatar removed from missing-VOD
+thumbnails, focused-title marquee removed, and TV RecyclerView item-change animations disabled.
+Do not test/install each of these separately: the user requested 3-5 changes per device round.
+Offline state filtering is centralized in PlayerRepository, including media-button/service restores,
+with three regression tests (13 unit tests total).

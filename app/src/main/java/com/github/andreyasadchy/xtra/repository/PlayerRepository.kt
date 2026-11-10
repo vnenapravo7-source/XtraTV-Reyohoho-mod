@@ -2129,7 +2129,7 @@ class PlayerRepository(
     }
 
     suspend fun getPlaybackStates() = withContext(Dispatchers.IO) {
-        playbackStatesDao.getAll()
+        com.github.andreyasadchy.xtra.util.RestorablePlaybackStates.filter(playbackStatesDao.getAll())
     }
 
     suspend fun savePlaybackStates(items: List<PlaybackState>) = withContext(Dispatchers.IO) {

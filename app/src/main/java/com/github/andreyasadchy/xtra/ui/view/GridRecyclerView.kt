@@ -187,6 +187,11 @@ class GridRecyclerView : RecyclerView {
             }
         }
         layoutManager = gridLayoutManager
+        if (isTv) {
+            // Viewer counts/thumbnails refresh while navigating: keep the data update,
+            // without DefaultItemAnimator fading/moving multiple cards at once.
+            itemAnimator = null
+        }
         addItemDecoration(columns)
         if (isTv) {
             // room for the zoomed focused card at the edges

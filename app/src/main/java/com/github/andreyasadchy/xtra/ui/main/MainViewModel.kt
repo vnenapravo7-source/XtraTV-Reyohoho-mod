@@ -122,7 +122,7 @@ class MainViewModel(
         if (!loadingPlaybackStates) {
             loadingPlaybackStates = true
             viewModelScope.launch {
-                playbackStates.emit(playerRepository.getPlaybackStates().filter { it.type != com.github.andreyasadchy.xtra.ui.player.BasePlaybackService.OFFLINE_VIDEO })
+                playbackStates.emit(playerRepository.getPlaybackStates())
             }.invokeOnCompletion {
                 loadingPlaybackStates = false
             }

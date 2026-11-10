@@ -7,7 +7,6 @@ import androidx.compose.animation.core.animateFloat
 import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
-import androidx.compose.foundation.basicMarquee
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.BringIntoViewSpec
@@ -52,8 +51,6 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.blur
-import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.focus.FocusDirection
 import androidx.compose.ui.focus.FocusRequester
@@ -820,14 +817,6 @@ private fun FocusCard(
     }
 }
 
-/** The title of the focused card scrolls slowly when it is too long, after a second (not while going through a row). */
-@OptIn(ExperimentalFoundationApi::class)
-private fun Modifier.titleMarquee(): Modifier = this.basicMarquee(
-    iterations = Int.MAX_VALUE,
-    initialDelayMillis = 1000,
-    repeatDelayMillis = 1500,
-    velocity = 40.dp,
-)
 
 @Composable
 private fun StreamCard(
@@ -861,7 +850,7 @@ private fun StreamCard(
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .then(if (focused) Modifier.shadow(18.dp, RoundedCornerShape(10.dp), ambientColor = MaterialTheme.colorScheme.primary, spotColor = MaterialTheme.colorScheme.primary) else Modifier)
+                // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
                 .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
@@ -979,7 +968,7 @@ private fun StreamCard(
                     color = TvColors.secondaryText,
                     maxLines = 1,
                     overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
-                    modifier = if (focused) Modifier.titleMarquee() else Modifier,
+                    modifier = Modifier,
                 )
                 if (!stream.gameName.isNullOrBlank()) {
                     Text(
@@ -988,7 +977,7 @@ private fun StreamCard(
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
                         overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
-                        modifier = if (focused) Modifier.titleMarquee() else Modifier,
+                        modifier = Modifier,
                     )
                 }
             }
@@ -1071,14 +1060,7 @@ private fun androidx.compose.foundation.layout.BoxScope.VideoThumbnail(thumbnail
         )
         return
     }
-    if (channelImage != null) {
-        AsyncImage(
-            model = channelImage,
-            contentDescription = null,
-            contentScale = ContentScale.Crop,
-            modifier = Modifier.fillMaxSize().blur(28.dp).graphicsLayer { alpha = 0.55f }
-        )
-    }
+    // One centered avatar over the card background; no duplicate blurred texture.
     Box(Modifier.fillMaxSize().background(Color(0x59000000)))
     if (channelImage != null) {
         AsyncImage(
@@ -1109,7 +1091,7 @@ private fun FollowedVideoCard(width: Dp, video: com.github.andreyasadchy.xtra.mo
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .then(if (focused) Modifier.shadow(18.dp, RoundedCornerShape(10.dp), ambientColor = MaterialTheme.colorScheme.primary, spotColor = MaterialTheme.colorScheme.primary) else Modifier)
+                // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
                 .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
@@ -1139,7 +1121,7 @@ private fun FollowedVideoCard(width: Dp, video: com.github.andreyasadchy.xtra.mo
             color = Color.White,
             maxLines = 1,
             overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
-            modifier = if (focused) Modifier.titleMarquee() else Modifier,
+            modifier = Modifier,
         )
         Text(
             listOfNotNull(video.channelName, video.gameName?.takeIf { it.isNotBlank() }).joinToString(" · "),
@@ -1164,7 +1146,7 @@ private fun ResumeCard(width: Dp, item: com.github.andreyasadchy.xtra.ui.tv.TvRe
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(16f / 9f)
-                .then(if (focused) Modifier.shadow(18.dp, RoundedCornerShape(10.dp), ambientColor = MaterialTheme.colorScheme.primary, spotColor = MaterialTheme.colorScheme.primary) else Modifier)
+                // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
                 .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
@@ -1221,7 +1203,7 @@ private fun ResumeCard(width: Dp, item: com.github.andreyasadchy.xtra.ui.tv.TvRe
                     color = Color.White,
                     maxLines = 1,
                     overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
-                    modifier = if (focused) Modifier.titleMarquee() else Modifier,
+                    modifier = Modifier,
                 )
                 Text(item.channelName ?: item.channelLogin ?: "", fontSize = if (small) 11.sp else 13.sp, color = TvColors.secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 if (!item.gameName.isNullOrBlank()) {
@@ -1231,7 +1213,7 @@ private fun ResumeCard(width: Dp, item: com.github.andreyasadchy.xtra.ui.tv.TvRe
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
                         overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
-                        modifier = if (focused) Modifier.titleMarquee() else Modifier,
+                        modifier = Modifier,
                     )
                 }
             }
@@ -1298,7 +1280,7 @@ private fun GameCard(game: Game, actions: TvHomeActions, modifier: Modifier) {
             Modifier
                 .fillMaxWidth()
                 .aspectRatio(3f / 4f)
-                .then(if (focused) Modifier.shadow(18.dp, RoundedCornerShape(10.dp), ambientColor = MaterialTheme.colorScheme.primary, spotColor = MaterialTheme.colorScheme.primary) else Modifier)
+                // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
                 .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
@@ -1319,7 +1301,7 @@ private fun GameCard(game: Game, actions: TvHomeActions, modifier: Modifier) {
             color = Color.White,
             maxLines = 1,
             overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
-            modifier = if (focused) Modifier.titleMarquee() else Modifier,
+            modifier = Modifier,
         )
         game.viewerCount?.let {
             Text(actions.formatViewers(it), fontSize = 12.sp, color = TvColors.secondaryText, maxLines = 1)
