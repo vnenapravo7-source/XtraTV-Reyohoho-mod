@@ -1,0 +1,28 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <item name="tvNavSearch" type="id" />
+    <item name="tvMarqueeStart" type="id" />
+    <item name="tvSettingIconTint" type="id" />
+    <item name="tvNavSettings" type="id" />
+    <item name="tvNavAccount" type="id" />
+    <item name="tvMoveUp" type="id" />
+    <item name="tvMoveDown" type="id" />
+    <item name="tvRowsHighlighted" type="id" />
+    <item name="tvVoiceSearch" type="id" />
+    <item name="tvSearchBar" type="id" />
+    <item name="tvHome" type="id" />
+    <item name="tvSwitchOverlay" type="id" />
+    <item name="tvBaseTextSize" type="id" />
+    <item name="tvSheetCompose" type="id" />
+    <item name="tvHeaderActions" type="id" />
+    <item name="tvHeaderCompose" type="id" />
+    <item name="tvSettingsRowBackground" type="id" />
+    <item name="tvNavFollowedVideos" type="id" />
+    <item name="tvNavFollowedChannels" type="id" />
+    <item name="tvNavFollowedGames" type="id" />
+    <item name="tvPipLabel" type="id" />
+    <item name="tvDisabledRow" type="id" />
+    <item name="tvLoadingPicture" type="id" />
+    <item name="tvPipTexture" type="id" />
+    <item name="tvPipDim" type="id" />
+</resources>

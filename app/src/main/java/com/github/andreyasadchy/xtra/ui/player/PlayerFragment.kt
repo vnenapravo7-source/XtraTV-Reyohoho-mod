@@ -1,0 +1,4400 @@
+package com.github.andreyasadchy.xtra.ui.player
+
+import com.github.andreyasadchy.xtra.util.TvLitePolicy
+
+import coil3.imageLoader
+import coil3.asDrawable
+import coil3.request.target
+import coil3.request.transformations
+import android.animation.Animator
+import android.animation.AnimatorListenerAdapter
+import android.annotation.SuppressLint
+import android.app.PendingIntent
+import android.app.PictureInPictureParams
+import android.app.RemoteAction
+import android.content.Context
+import android.content.Intent
+import android.content.pm.ActivityInfo
+import android.content.pm.PackageManager
+import android.content.res.Configuration
+import android.graphics.Color
+import android.graphics.drawable.Icon
+import android.os.Build
+import android.os.Bundle
+import android.os.SystemClock
+import android.text.format.DateFormat
+import android.text.format.DateUtils
+import android.util.TypedValue
+import android.view.GestureDetector
+import android.view.Gravity
+import android.view.KeyEvent
+import android.view.LayoutInflater
+import android.view.MotionEvent
+import android.view.RoundedCorner
+import android.view.VelocityTracker
+import android.view.View
+import android.view.ViewConfiguration
+import android.view.ViewGroup
+import android.view.ViewPropertyAnimator
+import android.view.inputmethod.InputMethodManager
+import android.widget.Button
+import android.widget.FrameLayout
+import android.widget.TextView
+import android.widget.LinearLayout
+import android.widget.Toast
+import androidx.activity.OnBackPressedCallback
+import androidx.activity.trackPipAnimationHintView
+import androidx.annotation.OptIn
+import androidx.core.content.edit
+import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.padding
+import androidx.compose.runtime.getValue
+import androidx.compose.ui.focus.focusRequester
+import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
+import androidx.core.net.toUri
+import androidx.core.view.ViewCompat
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
+import androidx.core.view.doOnLayout
+import androidx.core.view.doOnPreDraw
+import androidx.core.view.isVisible
+import androidx.core.view.updateLayoutParams
+import androidx.core.view.updatePadding
+import androidx.fragment.app.viewModels
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.lifecycleScope
+import androidx.lifecycle.repeatOnLifecycle
+import androidx.media3.common.util.UnstableApi
+import androidx.media3.ui.AspectRatioFrameLayout
+import androidx.media3.ui.TimeBar
+import androidx.navigation.fragment.findNavController
+import androidx.recyclerview.widget.RecyclerView
+import com.github.andreyasadchy.xtra.BuildConfig
+import com.github.andreyasadchy.xtra.R
+import com.github.andreyasadchy.xtra.databinding.FragmentPlayerBinding
+import com.github.andreyasadchy.xtra.model.VideoQuality
+import com.github.andreyasadchy.xtra.model.ui.Stream
+import com.github.andreyasadchy.xtra.model.ui.Video
+import com.github.andreyasadchy.xtra.ui.channel.ChannelPagerFragmentDirections
+import com.github.andreyasadchy.xtra.ui.chat.ChatFragment
+import com.github.andreyasadchy.xtra.ui.common.BaseNetworkFragment
+import com.github.andreyasadchy.xtra.ui.common.IntegrityDialog
+import com.github.andreyasadchy.xtra.ui.common.RadioButtonDialogFragment
+import com.github.andreyasadchy.xtra.ui.game.GameMediaFragmentDirections
+import com.github.andreyasadchy.xtra.ui.game.GamePagerFragmentDirections
+import com.github.andreyasadchy.xtra.ui.main.MainActivity
+import com.github.andreyasadchy.xtra.ui.player.PlayerViewModel.Companion.PlayerViewModelFactory
+import com.github.andreyasadchy.xtra.util.C
+import com.github.andreyasadchy.xtra.util.TwitchApiHelper
+import com.github.andreyasadchy.xtra.util.getAlertDialogBuilder
+import com.github.andreyasadchy.xtra.util.isKeyboardShown
+import com.github.andreyasadchy.xtra.util.prefs
+import com.github.andreyasadchy.xtra.util.tokenPrefs
+import com.google.android.material.bottomsheet.BottomSheetDialogFragment
+import com.google.android.material.color.MaterialColors
+import com.google.android.material.timepicker.MaterialTimePicker
+import com.google.android.material.timepicker.TimeFormat
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.collectLatest
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.max
+import kotlin.time.Duration.Companion.milliseconds
+import kotlin.time.Instant
+
+@OptIn(UnstableApi::class)
+abstract class PlayerFragment : BaseNetworkFragment(), RadioButtonDialogFragment.OnSortOptionChanged, IntegrityDialog.Listener {
+
+    private var _binding: FragmentPlayerBinding? = null
+    protected val binding get() = _binding!!
+    protected val viewModel: PlayerViewModel by viewModels { PlayerViewModelFactory }
+    protected var chatFragment: ChatFragment? = null
+    protected open val playbackService: BasePlaybackService? = null
+    protected var started = false
+
+    private var isPortrait = false
+    // read from the app, not from the screen: the activity asks a new player screen (a switch) before it is attached
+    protected val isTv by lazy { com.github.andreyasadchy.xtra.XtraApp.INSTANCE.resources.getBoolean(R.bool.isTv) }
+    /** Controls stay longer on TV, moving between them with a remote takes more time than tapping. */
+    protected val controllerHideDelay by lazy { if (isTv) 6000L else 3000L }
+    protected var isMaximized = true
+    private var isChatOpen = true
+    private var isKeyboardShown = false
+    private var resizeMode = 0
+    private var chatWidthLandscape = 0
+
+    private var activePointerId = -1
+    private var lastX = 0f
+    private var lastY = 0f
+    private var velocityTracker: VelocityTracker? = null
+    private var isTap = false
+    private var tapEventTime = 0L
+    private var startTranslationX = 0f
+    private var startTranslationY = 0f
+    private var statusBarSwipe = false
+    private var chatStatusBarSwipe = false
+    private var isAnimating = false
+    private var moveAnimation: ViewPropertyAnimator? = null
+    protected var useController = true
+    protected var controllerAutoHide = true
+    private var controllerHideOnTouch = true
+    private val controllerHideAction = Runnable { if (view != null) hideController() }
+
+    /**
+     * TV: the HUD is shown for a moment after a switch of stream, without the focus: left / right still switch streams,
+     * OK (or up / down without their shortcuts) gives it the focus as usual.
+     */
+    private var hudPeek = false
+    /**
+     * TV: the HUD was opened by the user (OK, up / down): left / right move in the timeline. Otherwise (hidden, info of a
+     * switch, HUD left on screen by a quick series of switches...) left / right always change the streamer.
+     */
+    private var hudOpenedByUser = false
+        set(value) {
+            field = value
+            // TV: the timeline only takes the focus in a HUD opened on purpose, it never catches left / right of a switch
+            if (isTv) {
+                _binding?.let { binding ->
+                    val progressBar = binding.playerControls.progressBar
+                    if (!value && progressBar.isFocused) {
+                        // the timeline had the focus (HUD hidden by back or by itself): the player gets it first, else
+                        // nothing would have it any more and OK / up / down could not show the HUD again
+                        binding.dragView.requestFocus()
+                    }
+                    progressBar.isFocusable = value
+                }
+            }
+        }
+
+    /** A live stream: from the service, or from the screen itself while its service connects (a switch just made it). */
+    private fun isStreamScreen(): Boolean {
+        return playbackService?.type == BasePlaybackService.STREAM || (playbackService == null && arguments?.getBoolean(KEY_STREAM) == true)
+    }
+
+    /** TV: left / right change the streamer (option on, a live stream, a HUD not opened on purpose). */
+    private fun dpadSwitchesStreams(): Boolean {
+        // the settings of the app: also for a new player screen not attached yet
+        return isTv && isStreamScreen() && !hudOpenedByUser && com.github.andreyasadchy.xtra.XtraApp.INSTANCE.prefs().getBoolean(C.TV_DPAD_SWITCH_STREAM, false)
+    }
+
+    /**
+     * TV: left / right of the remote are handled by the activity before Android looks for the view that gets them: a
+     * switch replaces the player screen, and the keys pressed meanwhile (queued while the new screen is made) found no
+     * focused view and went to a button of the HUD (seek) or behind the player (focus lost). True also while the new
+     * screen has no view yet. Not when the chat has the focus nor in a HUD opened on purpose.
+     */
+    fun handlesDpadSwitch(): Boolean {
+        if (!isTv || !isMaximized || !dpadSwitchesStreams()) {
+            return false
+        }
+        return _binding == null || !binding.chatLayout.hasFocus()
+    }
+
+    /** The player screen is in full screen (also before its view is made). */
+    fun isMaximizedScreen() = isMaximized && !isRemoving
+    private val hudPeekHideAction = Runnable {
+        if (view != null && hudPeek) {
+            hudPeek = false
+            TvSwitchOverlay.hide(activity)
+            if (!hudOpenedByUser) {
+                // hidden even while it was still fading in or out (quick switches), it never stays on screen
+                hideController(force = true)
+            }
+        }
+    }
+
+    private fun peekHud() {
+        if (binding.playerControls.root.hasFocus()) {
+            return
+        }
+        hudPeek = true
+        // only the info of the stream (title, channel, category, viewers, quality...), no buttons nor timeline
+        setHudInfoOnly(true)
+        showController()
+        binding.root.removeCallbacks(hudPeekHideAction)
+        binding.root.postDelayed(hudPeekHideAction, 2500L)
+    }
+
+    /** TV: the buttons and the timeline of the HUD hidden (the info of the stream after a switch) or shown again. */
+    private fun setHudInfoOnly(infoOnly: Boolean) {
+        val controls = _binding?.playerControls?.root ?: return
+        val visibility = if (infoOnly) View.GONE else View.VISIBLE
+        controls.findViewById<View>(R.id.bottomLayout)?.visibility = visibility
+        (controls.findViewById<View>(R.id.bottomLeftLayout)?.parent as? View)?.visibility = visibility
+    }
+
+    /** The HUD gets the focus (or goes): it is no longer a short look. */
+    private fun endHudPeek() {
+        if (hudPeek) {
+            TvSwitchOverlay.hide(activity)
+        }
+        hudPeek = false
+        _binding?.root?.removeCallbacks(hudPeekHideAction)
+    }
+    private var controllerIsAnimating = false
+    private var controllerAnimation: ViewPropertyAnimator? = null
+    private var backgroundColor: Int? = null
+    private var backgroundVisible = false
+
+    private val backPressedCallback = object : OnBackPressedCallback(true) {
+        override fun handleOnBackPressed() {
+            if (_binding != null && hudPeek && binding.playerControls.root.isVisible) {
+                // the info of the stream shown after a switch: back only hides it (and the streamers left and right)
+                TvSwitchOverlay.hide(activity, force = true)
+                hideController()
+            } else if (_binding != null && controllerAutoHide && controllerHideOnTouch && binding.playerControls.root.isVisible && binding.playerControls.root.hasFocus()) {
+                hideController()
+            } else if (_binding != null && binding.chatLayout.hasFocus()) {
+                binding.dragView.requestFocus()
+            } else if (isTv) {
+                // TV: back stops the stream, or keeps it in the mini player or as audio only (setting)
+                leaveForBrowsing()
+            } else {
+                minimize()
+            }
+        }
+    }
+
+    private val minimizedBackPressedCallback = object : OnBackPressedCallback(false) {
+        override fun handleOnBackPressed() {
+            close()
+            (activity as? MainActivity)?.closePlayer()
+        }
+    }
+
+    open fun getCurrentPosition(): Long? = null
+    /** Live: the time of Twitch of the picture shown (the delay of the chat follows it), null when not known. */
+    open fun getLivePictureTime(): Long? = null
+    open fun getCurrentSpeed(): Float? = null
+    open fun getCurrentVolume(): Float? = null
+
+    /** TV: the sound of the small window changed, the volume of this stream follows it. */
+    open fun refreshVolume() {}
+    open fun getTotalDuration(): Long? = null
+    open fun playPause() {}
+    open fun rewind() {}
+    open fun fastForward() {}
+    open fun seek(position: Long) {}
+    open fun seekToLivePosition() {}
+    open fun setPlaybackSpeed(speed: Float) {}
+    open fun changeVolume(volume: Float) {}
+    open fun updateProgress() {}
+    open fun restartPlayer() {}
+    open fun toggleAudioCompressor() {}
+    open fun setSubtitlesButton() {}
+    open fun toggleSubtitles(enabled: Boolean) {}
+    open fun getUnavailableQualities(): List<VideoQuality> = emptyList()
+    open fun showPlaylistTags(mediaPlaylist: Boolean) {}
+    open fun changeQuality(selectedQuality: VideoQuality?) {}
+    open fun startAudioOnly() {}
+    open fun close(deleteStates: Boolean = true) {}
+    open fun retry(item: String) {}
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        if (arguments?.getBoolean(KEY_OFFLINE) == true) {
+            enableNetworkCheck = false
+        }
+        super.onCreate(savedInstanceState)
+        isPortrait = resources.configuration.orientation == Configuration.ORIENTATION_PORTRAIT
+        requireActivity().onBackPressedDispatcher.addCallback(this, backPressedCallback)
+        WindowCompat.getInsetsController(
+            requireActivity().window,
+            requireActivity().window.decorView
+        ).systemBarsBehavior = WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+    }
+
+    override fun onCreateView(inflater: LayoutInflater, container: ViewGroup?, savedInstanceState: Bundle?): View {
+        _binding = FragmentPlayerBinding.inflate(inflater, container, false)
+        return binding.root
+    }
+
+    @SuppressLint("ClickableViewAccessibility")
+    override fun onViewCreated(view: View, savedInstanceState: Bundle?) {
+        super.onViewCreated(view, savedInstanceState)
+        if (isTv) {
+            showLoadingPicture()
+            viewLifecycleOwner.lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    while (true) {
+                        kotlinx.coroutines.delay(1000L)
+                        checkTvDvrCaughtUp()
+                    }
+                }
+            }
+        }
+        with(binding) {
+            viewLifecycleOwner.lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    viewModel.integrity.collect {
+                        (requireActivity() as? MainActivity)?.getNewIntegrityToken(it, childFragmentManager)
+                    }
+                }
+            }
+            val ignoreCutouts = requireContext().prefs().getBoolean(C.UI_DRAW_BEHIND_CUTOUTS, false)
+            val cornerPadding = requireContext().prefs().getBoolean(C.PLAYER_ROUNDED_CORNER_PADDING, false)
+            ViewCompat.setOnApplyWindowInsetsListener(view) { _, windowInsets ->
+                val insets = if (!isPortrait && ignoreCutouts) {
+                    windowInsets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
+                } else {
+                    windowInsets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime() or WindowInsetsCompat.Type.displayCutout())
+                }
+                if (isPortrait) {
+                    slidingLayout.updatePadding(left = 0, top = insets.top, right = 0)
+                } else {
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && cornerPadding) {
+                        val rootWindowInsets = view.rootView.rootWindowInsets
+                        val topLeft = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT)
+                        val topRight = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_TOP_RIGHT)
+                        val bottomLeft = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_LEFT)
+                        val bottomRight = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_RIGHT)
+                        val leftRadius = max(topLeft?.radius ?: 0, bottomLeft?.radius ?: 0)
+                        val rightRadius = max(topRight?.radius ?: 0, bottomRight?.radius ?: 0)
+                        if (ignoreCutouts) {
+                            slidingLayout.updatePadding(left = leftRadius, top = 0, right = rightRadius)
+                        } else {
+                            val cutoutInsets = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+                            slidingLayout.updatePadding(left = max(cutoutInsets.left, leftRadius), top = 0, right = max(cutoutInsets.right, rightRadius))
+                        }
+                    } else {
+                        if (ignoreCutouts) {
+                            slidingLayout.updatePadding(left = 0, top = 0, right = 0)
+                        } else {
+                            val cutoutInsets = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+                            slidingLayout.updatePadding(left = cutoutInsets.left, top = 0, right = cutoutInsets.right)
+                        }
+                    }
+                }
+                chatLayout.updatePadding(bottom = insets.bottom)
+                WindowInsetsCompat.CONSUMED
+            }
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && requireActivity().packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)) {
+                viewLifecycleOwner.lifecycleScope.launch {
+                    repeatOnLifecycle(Lifecycle.State.STARTED) {
+                        requireActivity().trackPipAnimationHintView(playerLayout)
+                    }
+                }
+            }
+            if (requireContext().prefs().getBoolean(C.PLAYER_KEEP_SCREEN_ON_WHEN_PAUSED, false)) {
+                view.keepScreenOn = true
+            }
+            if (isMaximized) {
+                enableBackground()
+            } else {
+                disableBackground()
+            }
+            isChatOpen = false // Every stream starts with chat disconnected; opening is manual.
+            requireContext().prefs().edit { putBoolean(C.KEY_CHAT_OPENED, false) }
+            // FragmentManager can restore a previously open chat after process recreation.
+            (childFragmentManager.findFragmentById(R.id.chatFragmentContainer) as? ChatFragment)?.let {
+                childFragmentManager.beginTransaction().remove(it).commitNow()
+                chatFragment = null
+            }
+            chatWidthLandscape = requireContext().prefs().getInt(C.LANDSCAPE_CHAT_WIDTH, 0)
+            resizeMode = requireContext().prefs().getInt(C.ASPECT_RATIO_LANDSCAPE, AspectRatioFrameLayout.RESIZE_MODE_FIT)
+            aspectRatioFrameLayout.setAspectRatio(16f / 9f)
+            initLayout()
+            changePlayerMode()
+            dragView.setOnKeyListener { _, keyCode, event ->
+                onPlayerKey(keyCode, event)
+            }
+            dragView.setOnFocusChangeListener { _, hasFocus ->
+                minimizedBackPressedCallback.isEnabled = hasFocus && !isMaximized
+            }
+            if (isMaximized) {
+                (activity as? MainActivity)?.setMainContentFocusable(false)
+                dragView.post {
+                    if (view != null && isMaximized) {
+                        binding.dragView.requestFocus()
+                    }
+                }
+            }
+            val viewConfiguration = ViewConfiguration.get(requireContext())
+            val touchSlop = viewConfiguration.scaledTouchSlop
+            val touchSlopRange = -touchSlop.toFloat()..touchSlop.toFloat()
+            val longPressTimeout = ViewConfiguration.getLongPressTimeout()
+            val moveFreely = requireContext().prefs().getBoolean(C.PLAYER_MOVE_FREELY, false)
+            val doubleTap = requireContext().prefs().getBoolean(C.PLAYER_DOUBLE_TAP, true) && !requireContext().prefs().getBoolean(C.CHAT_DISABLE, false)
+            val controllerTapDetector = GestureDetector(
+                requireContext(),
+                object : GestureDetector.SimpleOnGestureListener() {
+                    override fun onSingleTapUp(e: MotionEvent): Boolean {
+                        return if (!doubleTap || isPortrait) {
+                            val visible = playerControls.root.isVisible
+                            if (visible) {
+                                if (controllerHideOnTouch) {
+                                    hideController()
+                                }
+                            } else {
+                                showController()
+                            }
+                            if (!visible) {
+                                updateProgress()
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+
+                    override fun onSingleTapConfirmed(e: MotionEvent): Boolean {
+                        return if (doubleTap && !isPortrait) {
+                            val visible = playerControls.root.isVisible
+                            if (visible) {
+                                if (controllerHideOnTouch) {
+                                    hideController()
+                                }
+                            } else {
+                                showController()
+                            }
+                            if (!visible) {
+                                updateProgress()
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+
+                    override fun onDoubleTap(e: MotionEvent): Boolean {
+                        return if (doubleTap && !isPortrait && isMaximized) {
+                            if (chatLayout.isVisible) {
+                                hideChat()
+                            } else {
+                                showChat()
+                            }
+                            true
+                        } else {
+                            false
+                        }
+                    }
+                }
+            )
+
+            fun downAction(event: MotionEvent) {
+                moveAnimation?.cancel()
+                isTap = true
+                tapEventTime = event.eventTime
+                if (isMaximized) {
+                    if (playerControls.root.isVisible) {
+                        playerControls.root.dispatchTouchEvent(event)
+                    } else {
+                        controllerTapDetector.onTouchEvent(event)
+                    }
+                } else {
+                    velocityTracker?.clear()
+                    if (velocityTracker == null) {
+                        velocityTracker = VelocityTracker.obtain()
+                    }
+                    velocityTracker?.addMovement(
+                        MotionEvent.obtain(
+                            event.downTime,
+                            event.eventTime,
+                            event.action,
+                            slidingLayout.translationX,
+                            slidingLayout.translationY,
+                            event.metaState
+                        )
+                    )
+                    startTranslationX = slidingLayout.translationX
+                    startTranslationY = slidingLayout.translationY
+                }
+            }
+
+            fun upAction(event: MotionEvent) {
+                if (isMaximized) {
+                    if (playerControls.progressBar.isPressed) {
+                        playerControls.root.dispatchTouchEvent(event)
+                    } else {
+                        if (slidingLayout.translationY in touchSlopRange) {
+                            if (playerControls.root.isVisible) {
+                                playerControls.root.dispatchTouchEvent(event)
+                            } else {
+                                controllerTapDetector.onTouchEvent(event)
+                            }
+                        }
+                        val minimizeThreshold = slidingLayout.height / 5
+                        if (slidingLayout.translationY < minimizeThreshold) {
+                            moveAnimation = slidingLayout.animate().apply {
+                                translationX(0f)
+                                translationY(0f)
+                                setDuration(250L)
+                                setListener(
+                                    object : AnimatorListenerAdapter() {
+                                        override fun onAnimationEnd(animation: Animator) {
+                                            setListener(null)
+                                            if (this@PlayerFragment.view != null && slidingLayout.translationY < touchSlop) {
+                                                enableBackground()
+                                            }
+                                        }
+                                    }
+                                )
+                                start()
+                            }
+                        } else {
+                            minimize()
+                        }
+                    }
+                } else {
+                    velocityTracker?.computeCurrentVelocity(1000)
+                    val xVelocity = velocityTracker?.xVelocity ?: 0f
+                    velocityTracker?.recycle()
+                    velocityTracker = null
+                    when {
+                        xVelocity > 1500 -> {
+                            isAnimating = true
+                            slidingLayout.animate().apply {
+                                translationX(slidingLayout.translationX + (slidingLayout.width * slidingLayout.scaleX))
+                                setDuration(250L)
+                                start()
+                            }
+                            close()
+                            (activity as? MainActivity)?.closePlayer()
+                        }
+                        xVelocity < -1500 -> {
+                            isAnimating = true
+                            slidingLayout.animate().apply {
+                                translationX(slidingLayout.translationX - (slidingLayout.width * slidingLayout.scaleX))
+                                setDuration(250L)
+                                start()
+                            }
+                            close()
+                            (activity as? MainActivity)?.closePlayer()
+                        }
+                        else -> {
+                            if (isTap && (event.eventTime - tapEventTime) < longPressTimeout) {
+                                maximize()
+                            } else {
+                                if (moveFreely) {
+                                    val windowInsets = ViewCompat.getRootWindowInsets(requireView())
+                                    val insets = windowInsets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                                    val scaledXDiff = (slidingLayout.width * (1f - slidingLayout.scaleX)) / 2
+                                    val scaledYDiff = (slidingLayout.height * (1f - slidingLayout.scaleY)) / 2
+                                    val minX = 0f - scaledXDiff - ((insets?.left ?: 0) * slidingLayout.scaleX) + (insets?.left ?: 0)
+                                    val minY = 0f - scaledYDiff - ((insets?.top ?: 0) * slidingLayout.scaleY) + (insets?.top ?: 0)
+                                    val maxX = 0f - scaledXDiff - ((insets?.left ?: 0) * slidingLayout.scaleX) + slidingLayout.width - (playerLayout.width * slidingLayout.scaleX) - (insets?.right ?: 0)
+                                    val maxY = 0f - scaledYDiff - ((insets?.top ?: 0) * slidingLayout.scaleY) + slidingLayout.height - (playerLayout.height * slidingLayout.scaleY) - (insets?.bottom ?: 0)
+                                    val newX = when {
+                                        slidingLayout.translationX < minX -> minX
+                                        slidingLayout.translationX > maxX -> maxX
+                                        else -> null
+                                    }
+                                    val newY = when {
+                                        slidingLayout.translationY < minY -> minY
+                                        slidingLayout.translationY > maxY -> maxY
+                                        else -> null
+                                    }
+                                    if (newX != null || newY != null) {
+                                        moveAnimation = slidingLayout.animate().apply {
+                                            newX?.let { translationX(it) }
+                                            newY?.let { translationY(it) }
+                                            setDuration(250L)
+                                            start()
+                                        }
+                                    }
+                                } else {
+                                    val windowInsets = ViewCompat.getRootWindowInsets(requireView())
+                                    val insets = windowInsets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                                    val keyboardInsets = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom?.let { if (it > 0) it - (insets?.bottom ?: 0) else it } ?: 0
+                                    val scaledXDiff = (slidingLayout.width * (1f - slidingLayout.scaleX)) / 2
+                                    val scaledYDiff = (slidingLayout.height * (1f - slidingLayout.scaleY)) / 2
+                                    val navBarHeight = requireView().rootView.findViewById<LinearLayout>(R.id.navBarContainer)?.height?.takeIf { it > 0 }?.let { it - keyboardInsets } ?: (insets?.bottom ?: 0)
+                                    val newX = slidingLayout.width - (insets?.right ?: 0) - (playerLayout.width * slidingLayout.scaleX) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 20F, resources.displayMetrics) * slidingLayout.scaleX)
+                                    val newY = slidingLayout.height - navBarHeight - (playerLayout.height * slidingLayout.scaleY) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 30F, resources.displayMetrics) * slidingLayout.scaleY)
+                                    moveAnimation = slidingLayout.animate().apply {
+                                        translationX(0f - scaledXDiff - ((insets?.left ?: 0) * slidingLayout.scaleX) + newX)
+                                        translationY(0f - scaledYDiff - ((insets?.top ?: 0) * slidingLayout.scaleY) + newY)
+                                        setDuration(250L)
+                                        start()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
+            dragView.setOnTouchListener { _, event ->
+                if (!isAnimating) {
+                    when (event.actionMasked) {
+                        MotionEvent.ACTION_DOWN -> {
+                            activePointerId = event.getPointerId(0)
+                            val x = event.x
+                            val y = event.y
+                            lastX = x * slidingLayout.scaleX
+                            lastY = y * slidingLayout.scaleY
+                            statusBarSwipe = !isPortrait && y <= 100
+                            downAction(event)
+                        }
+                        MotionEvent.ACTION_POINTER_DOWN -> {
+                            if (activePointerId == -1) {
+                                val pointerIndex = event.actionIndex
+                                val pointerId = event.getPointerId(pointerIndex)
+                                val x = event.getX(pointerIndex)
+                                val y = event.getY(pointerIndex)
+                                if (x in 0f..playerLayout.width.toFloat() && y in 0f..playerLayout.height.toFloat()) {
+                                    activePointerId = pointerId
+                                    lastX = x * slidingLayout.scaleX
+                                    lastY = y * slidingLayout.scaleY
+                                    statusBarSwipe = !isPortrait && y <= 100
+                                    downAction(event)
+                                }
+                            }
+                        }
+                        MotionEvent.ACTION_MOVE -> {
+                            if (isMaximized) {
+                                playerControls.root.dispatchTouchEvent(event)
+                                if (!playerControls.progressBar.isPressed && !statusBarSwipe && activePointerId != -1) {
+                                    val pointerIndex = event.findPointerIndex(activePointerId)
+                                    if (pointerIndex != -1) {
+                                        val y = event.getY(pointerIndex)
+                                        val translationY = y - lastY
+                                        if (slidingLayout.translationY + translationY < 0) {
+                                            slidingLayout.translationY = 0f
+                                            lastY = y
+                                        } else {
+                                            slidingLayout.translationY += translationY
+                                            lastY = y - translationY
+                                        }
+                                        if (slidingLayout.translationY < touchSlop) {
+                                            if (!backgroundVisible) {
+                                                enableBackground()
+                                            }
+                                        } else {
+                                            if (backgroundVisible) {
+                                                disableBackground()
+                                            }
+                                        }
+                                    }
+                                }
+                            } else {
+                                if (activePointerId != -1) {
+                                    val pointerIndex = event.findPointerIndex(activePointerId)
+                                    if (pointerIndex != -1) {
+                                        val x = event.getX(pointerIndex) * slidingLayout.scaleX
+                                        val y = event.getY(pointerIndex) * slidingLayout.scaleY
+                                        val translationX = x - lastX
+                                        val translationY = y - lastY
+                                        slidingLayout.translationX += translationX
+                                        if (moveFreely) {
+                                            slidingLayout.translationY += translationY
+                                        }
+                                        lastX = x - translationX
+                                        lastY = y - translationY
+                                        velocityTracker?.addMovement(
+                                            MotionEvent.obtain(
+                                                event.downTime,
+                                                event.eventTime,
+                                                event.action,
+                                                slidingLayout.translationX,
+                                                slidingLayout.translationY,
+                                                event.metaState
+                                            )
+                                        )
+                                        if (isTap && ((startTranslationX - slidingLayout.translationX) !in touchSlopRange || (startTranslationY - slidingLayout.translationY) !in touchSlopRange)) {
+                                            isTap = false
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        MotionEvent.ACTION_POINTER_UP -> {
+                            val pointerIndex = event.actionIndex
+                            val pointerId = event.getPointerId(pointerIndex)
+                            if (pointerId == activePointerId) {
+                                var newId = -1
+                                for (i in 0 until event.pointerCount) {
+                                    val id = event.getPointerId(i)
+                                    if (id != activePointerId) {
+                                        val x = event.getX(i)
+                                        val y = event.getY(i)
+                                        if (x in 0f..playerLayout.width.toFloat() && y in 0f..playerLayout.height.toFloat()) {
+                                            newId = id
+                                            lastX = x * slidingLayout.scaleX
+                                            lastY = y * slidingLayout.scaleY
+                                            break
+                                        }
+                                    }
+                                }
+                                if (newId == -1) {
+                                    upAction(event)
+                                }
+                                activePointerId = newId
+                            }
+                        }
+                        MotionEvent.ACTION_UP, MotionEvent.ACTION_CANCEL -> upAction(event)
+                    }
+                }
+                true
+            }
+            chatTouchView.setOnTouchListener { _, event ->
+                when (event.actionMasked) {
+                    MotionEvent.ACTION_DOWN -> {
+                        chatStatusBarSwipe = !isPortrait && event.y <= 100
+                        chatLinearLayout.dispatchTouchEvent(event)
+                    }
+                    MotionEvent.ACTION_MOVE -> {
+                        if (chatStatusBarSwipe) {
+                            chatLinearLayout.dispatchTouchEvent(
+                                MotionEvent.obtain(event).apply {
+                                    action = MotionEvent.ACTION_CANCEL
+                                }
+                            )
+                        } else {
+                            chatLinearLayout.dispatchTouchEvent(event)
+                        }
+                    }
+                    else -> chatLinearLayout.dispatchTouchEvent(event)
+                }
+                true
+            }
+            with(playerControls) {
+                root.setOnTouchListener { _, event ->
+                    controllerTapDetector.onTouchEvent(event)
+                }
+                playPause.setOnClickListener {
+                    showController(force = true)
+                    playPause()
+                }
+                rewind.text = (requireContext().prefs().getString(C.PLAYER_REWIND, "10")?.toLongOrNull() ?: 10).toString()
+                rewind.setOnClickListener {
+                    showController(force = true)
+                    rewind()
+                }
+                fastForward.text = (requireContext().prefs().getString(C.PLAYER_FORWARD, "10")?.toLongOrNull() ?: 10).toString()
+                fastForward.setOnClickListener {
+                    showController(force = true)
+                    fastForward()
+                }
+                if (isTv) {
+                    progressBar.isFocusable = hudOpenedByUser
+                    progressBar.setOnKeyListener { _, keyCode, event ->
+                        // the timeline focused without a HUD opened on purpose: left / right still change the streamer
+                        if ((keyCode == KeyEvent.KEYCODE_DPAD_LEFT || keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) && _binding != null && dpadSwitchesStreams()) {
+                            binding.dragView.requestFocus()
+                            if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0 && ((activity as? MainActivity)?.streamQueue?.size ?: 0) > 1) {
+                                (activity as? MainActivity)?.switchStream(if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) 1 else -1)
+                            }
+                            return@setOnKeyListener true
+                        }
+                        // down from the timeline: back to the button the focus was on, not the nearest one
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN && event.action == KeyEvent.ACTION_DOWN && _binding != null) {
+                            val last = findLastControl()
+                            if (last != null && last.isShown && last.isFocusable && last.requestFocus()) {
+                                return@setOnKeyListener true
+                            }
+                        }
+                        onTimeBarKey(keyCode, event)
+                    }
+                    // discreet timeline: the scrubber and the accent color only show while it has the focus
+                    // the color of accent: the ambiance color of the Xtra TV settings
+                    val playedColor = if (com.github.andreyasadchy.xtra.ui.tv.TvAccent.current != null) {
+                        com.github.andreyasadchy.xtra.ui.tv.TvAccent.color
+                    } else {
+                        MaterialColors.getColor(progressBar, androidx.appcompat.R.attr.colorPrimary)
+                    }
+                    progressBar.hideScrubber(false)
+                    progressBar.setPlayedColor(0xE6FFFFFF.toInt())
+                    progressBar.setOnFocusChangeListener { _, hasFocus ->
+                        if (hasFocus) {
+                            progressBar.showScrubber()
+                            progressBar.setPlayedColor(playedColor)
+                        } else {
+                            progressBar.hideScrubber(false)
+                            progressBar.setPlayedColor(0xE6FFFFFF.toInt())
+                        }
+                    }
+                }
+                progressBar.addListener(
+                    object : TimeBar.OnScrubListener {
+                        override fun onScrubStart(timeBar: TimeBar, position: Long) {
+                            binding.playerControls.position.text = DateUtils.formatElapsedTime(position / 1000)
+                            binding.playerControls.root.removeCallbacks(controllerHideAction)
+                        }
+
+                        override fun onScrubMove(timeBar: TimeBar, position: Long) {
+                            binding.playerControls.position.text = DateUtils.formatElapsedTime(position / 1000)
+                        }
+
+                        override fun onScrubStop(timeBar: TimeBar, position: Long, canceled: Boolean) {
+                            if (!canceled) {
+                                seek(position)
+                            } else {
+                                if (controllerAutoHide && controllerHideOnTouch) {
+                                    binding.playerControls.root.postDelayed(controllerHideAction, controllerHideDelay)
+                                }
+                            }
+                        }
+                    }
+                )
+                position.text = DateUtils.formatElapsedTime(0)
+                duration.text = DateUtils.formatElapsedTime(0)
+                subtitleView.setUserDefaultStyle()
+                subtitleView.setUserDefaultTextSize()
+            }
+        }
+    }
+
+    fun start() {
+        setupTvHud()
+        setupSeekPreview()
+        // a switch of stream (left / right): the HUD of the stream reached for a moment, without the focus
+        if (isTv && peekHudOnStart) {
+            peekHudOnStart = false
+            binding.root.postDelayed({ if (view != null && isMaximized) peekHud() }, 300L)
+        }
+        with(binding) {
+            viewLifecycleOwner.lifecycleScope.launch {
+                repeatOnLifecycle(Lifecycle.State.STARTED) {
+                    playbackService?.integrity?.collect {
+                        (requireActivity() as? MainActivity)?.getNewIntegrityToken(it, childFragmentManager)
+                    }
+                }
+            }
+            if (playbackService?.type != BasePlaybackService.OFFLINE_VIDEO) {
+                viewModel.isFollowingChannel(
+                    requireContext().tokenPrefs().getString(C.USER_ID, null),
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    requireContext().prefs().getString(C.UI_FOLLOW_BUTTON, "0")?.toIntOrNull() ?: 0,
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                    TwitchApiHelper.getHelixHeaders(requireContext()),
+                )
+                when (playbackService?.type) {
+                    BasePlaybackService.STREAM -> {
+                        playbackService?.channelLogin?.let {
+                            viewModel.loadStreamInfo(
+                                channelId = playbackService?.channelId,
+                                channelLogin = it,
+                                // TV: a stream opened without its start (multi-stream...) loads its details for the timeline
+                                viewerCount = playbackService?.viewerCount?.takeUnless { isTv && playbackService?.createdAt.isNullOrBlank() },
+                                loop = requireContext().prefs().getBoolean(C.CHAT_DISABLE, false) || !requireContext().prefs().getBoolean(C.CHAT_PUB_SUB_ENABLED, true),
+                                networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                                helixHeaders = TwitchApiHelper.getHelixHeaders(requireContext()),
+                                gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
+                                enableIntegrity = requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                            )
+                        }
+                    }
+                    BasePlaybackService.VIDEO -> {
+                        val videoId = playbackService?.videoId
+                        if (!videoId.isNullOrBlank() && (requireContext().prefs().getBoolean(C.PLAYER_GAMES_BUTTON, true) || requireContext().prefs().getBoolean(C.PLAYER_MENU_GAMES, false))) {
+                            viewModel.loadGamesList(
+                                videoId,
+                                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                                TwitchApiHelper.getGQLHeaders(requireContext()),
+                                requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                            )
+                        }
+                    }
+                }
+            }
+            if (playbackService?.restoreQuality == true) {
+                playbackService?.restoreQuality = false
+                changeQuality(playbackService?.previousQuality)
+            }
+            with(playerControls) {
+                val channelLogin = playbackService?.channelLogin
+                val channelName = playbackService?.channelName
+                val displayName = if (channelLogin != null && !channelLogin.equals(channelName, true)) {
+                    when (requireContext().prefs().getString(C.UI_NAME_DISPLAY, "0")) {
+                        "0" -> "${channelName}(${channelLogin})"
+                        "1" -> channelName
+                        else -> channelLogin
+                    }
+                } else {
+                    channelName
+                }
+                if (requireContext().prefs().getBoolean(C.PLAYER_CHANNEL, true)) {
+                    channel.visibility = View.VISIBLE
+                    channel.text = displayName
+                    channel.setOnClickListener {
+                        findNavController().navigate(
+                            ChannelPagerFragmentDirections.actionGlobalChannelPagerFragment(
+                                channelId = playbackService?.channelId,
+                                channelLogin = playbackService?.channelLogin,
+                                channelName = playbackService?.channelName,
+                            )
+                        )
+                        leaveForBrowsing()
+                    }
+                }
+                val titleText = playbackService?.title
+                if (!titleText.isNullOrBlank() && requireContext().prefs().getBoolean(C.PLAYER_TITLE, true)) {
+                    title.visibility = View.VISIBLE
+                    title.text = titleText
+                }
+                val gameName = playbackService?.gameName
+                if (!gameName.isNullOrBlank() && requireContext().prefs().getBoolean(C.PLAYER_CATEGORY, true)) {
+                    category.visibility = View.VISIBLE
+                    category.text = gameName
+                    category.setOnClickListener {
+                        findNavController().navigate(
+                            if (requireContext().prefs().getBoolean(C.UI_GAME_PAGER, true)) {
+                                GamePagerFragmentDirections.actionGlobalGamePagerFragment(
+                                    gameId = playbackService?.gameId,
+                                    gameSlug = playbackService?.gameSlug,
+                                    gameName = gameName
+                                )
+                            } else {
+                                GameMediaFragmentDirections.actionGlobalGameMediaFragment(
+                                    gameId = playbackService?.gameId,
+                                    gameSlug = playbackService?.gameSlug,
+                                    gameName = gameName
+                                )
+                            }
+                        )
+                        leaveForBrowsing()
+                    }
+                }
+                updateTvAvatars()
+                // no minimize button on TV: back does it, as the setting says
+                if (!isTv && requireContext().prefs().getBoolean(C.PLAYER_MINIMIZE, true)) {
+                    minimize.visibility = View.VISIBLE
+                    minimize.setOnClickListener { minimize() }
+                }
+                if (requireContext().prefs().getBoolean(C.PLAYER_VOLUME_BUTTON, true)) {
+                    volume.visibility = View.VISIBLE
+                    volume.setOnClickListener {
+                        showController(force = true)
+                        showVolumeDialog()
+                    }
+                }
+                if (requireContext().prefs().getBoolean(C.PLAYER_SETTINGS, true)) {
+                    quality.visibility = View.VISIBLE
+                    quality.setOnClickListener {
+                        showController(force = true)
+                        showQualityDialog()
+                    }
+                }
+                if (requireContext().prefs().getBoolean(C.PLAYER_MODE, false)) {
+                    audioOnly.visibility = View.VISIBLE
+                    audioOnly.setOnClickListener {
+                        showController(force = true)
+                        if (playbackService?.quality?.name == VideoQuality.AUDIO_ONLY_QUALITY) {
+                            changeQuality(playbackService?.previousQuality)
+                        } else {
+                            changeQuality(playbackService?.qualities?.find { it.name == VideoQuality.AUDIO_ONLY_QUALITY })
+                        }
+                        changePlayerMode()
+                    }
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.P && requireContext().prefs().getBoolean(C.PLAYER_AUDIO_COMPRESSOR_BUTTON, true)) {
+                    audioCompressor.visibility = View.VISIBLE
+                    if (requireContext().prefs().getBoolean(C.PLAYER_AUDIO_COMPRESSOR, false)) {
+                        audioCompressor.setImageResource(R.drawable.baseline_audio_compressor_on_24dp)
+                    } else {
+                        audioCompressor.setImageResource(R.drawable.baseline_audio_compressor_off_24dp)
+                    }
+                    audioCompressor.setOnClickListener {
+                        showController(force = true)
+                        toggleAudioCompressor()
+                    }
+                }
+                if (requireContext().prefs().getBoolean(C.PLAYER_MENU, true)) {
+                    menu.visibility = View.VISIBLE
+                    menu.setOnClickListener {
+                        showController(force = true)
+                        PlayerSettingsDialog.newInstance(
+                            type = playbackService?.type,
+                            speedText = getCurrentSpeed()?.let { speed ->
+                                requireContext().prefs().getString(C.PLAYER_SPEED_LIST, "0.25\n0.5\n0.75\n1.0\n1.25\n1.5\n1.75\n2.0\n3.0\n4.0\n8.0")
+                                    ?.split("\n")?.find { it == speed.toString() }
+                            },
+                            vodGames = !viewModel.gamesList.value.isNullOrEmpty()
+                        ).show(childFragmentManager, "closeOnPip")
+                    }
+                }
+                if (playbackService?.type == BasePlaybackService.STREAM) {
+                    if (!requireContext().tokenPrefs().getString(C.USERNAME, null).isNullOrBlank() &&
+                        (!TwitchApiHelper.getGQLHeaders(requireContext(), true)[C.HEADER_TOKEN].isNullOrBlank() ||
+                                !TwitchApiHelper.getHelixHeaders(requireContext())[C.HEADER_TOKEN].isNullOrBlank())
+                    ) {
+                        if (requireContext().prefs().getBoolean(C.PLAYER_CHAT_BAR_TOGGLE, false) && !requireContext().prefs().getBoolean(C.CHAT_DISABLE, false) && !isTv) {
+                            toggleChatInput.visibility = View.VISIBLE
+                            toggleChatInput.setOnClickListener {
+                                showController(force = true)
+                                toggleChatBar()
+                            }
+                        }
+                        slidingLayout.viewTreeObserver.addOnGlobalLayoutListener {
+                            if (slidingLayout.isKeyboardShown) {
+                                if (!isKeyboardShown) {
+                                    isKeyboardShown = true
+                                    if (!isPortrait) {
+                                        chatLayout.updateLayoutParams { width = (slidingLayout.width / 1.8f).toInt() }
+                                        showStatusBar()
+                                    }
+                                }
+                            } else {
+                                if (isKeyboardShown) {
+                                    isKeyboardShown = false
+                                    chatLayout.clearFocus()
+                                    if (!isPortrait) {
+                                        chatLayout.updateLayoutParams { width = chatWidthLandscape }
+                                        if (isMaximized) {
+                                            hideStatusBar()
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        repeatOnLifecycle(Lifecycle.State.STARTED) {
+                            viewModel.stream.collectLatest { stream ->
+                                if (stream != null) {
+                                    stream.id?.let {
+                                        playbackService?.streamId = it
+                                        chatFragment?.updateStreamId(it)
+                                    }
+                                    if (requireContext().prefs().getBoolean(C.CHAT_DISABLE, false) ||
+                                        !requireContext().prefs().getBoolean(C.CHAT_PUB_SUB_ENABLED, true) ||
+                                        viewersText.text.isNullOrBlank()
+                                    ) {
+                                        updateViewerCount(stream.viewerCount)
+                                    }
+                                    if (requireContext().prefs().getBoolean(C.CHAT_DISABLE, false) ||
+                                        !requireContext().prefs().getBoolean(C.CHAT_PUB_SUB_ENABLED, true) ||
+                                        title.text.isNullOrBlank() ||
+                                        category.text.isNullOrBlank()
+                                    ) {
+                                        updateStreamInfo(stream.title, stream.gameId, stream.gameSlug, stream.gameName)
+                                    }
+                                    if (playbackService?.createdAt.isNullOrBlank() && !stream.createdAt.isNullOrBlank()) {
+                                        // a stream opened without its start (from the multi-stream, a link...): the
+                                        // timeline to go back into its VOD needs it
+                                        playbackService?.createdAt = stream.createdAt
+                                        if (isTvLiveTimeline()) {
+                                            updateTvLiveTimeline()
+                                        }
+                                    }
+                                    if (requireContext().prefs().getBoolean(C.PLAYER_SHOW_UPTIME, true) &&
+                                        !uptimeLayout.isVisible
+                                    ) {
+                                        stream.createdAt?.let { date ->
+                                            Instant.parseOrNull(date)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.let { createdAt ->
+                                                updateUptime(createdAt)
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        repeatOnLifecycle(Lifecycle.State.STARTED) {
+                            viewModel.unlistedVideoQualities.collectLatest { qualities ->
+                                if (qualities != null) {
+                                    if (qualities.isNotBlank()) {
+                                        if (pendingDvr) {
+                                            // go back in the live: open the VOD of the stream being broadcast at the chosen position
+                                            pendingDvr = false
+                                            val offset = pendingDvrPosition.coerceAtLeast(0L)
+                                            val video = Video(
+                                                channelId = playbackService?.channelId,
+                                                channelLogin = playbackService?.channelLogin,
+                                                channelName = playbackService?.channelName,
+                                                gameId = playbackService?.gameId,
+                                                gameSlug = playbackService?.gameSlug,
+                                                gameName = playbackService?.gameName,
+                                                title = playbackService?.title,
+                                                createdAt = playbackService?.createdAt,
+                                            )
+                                            // the VOD being recorded gives the chat of the broadcast (its replay), found
+                                            // while the video opens; none when the channel keeps no VOD
+                                            val activity = requireActivity() as MainActivity
+                                            activity.dvrChatVideoId = withTimeoutOrNull(2500L) {
+                                                viewModel.findArchiveVideoId(
+                                                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                                                    TwitchApiHelper.getGQLHeaders(requireContext()),
+                                                    playbackService?.channelId,
+                                                    playbackService?.channelLogin,
+                                                    playbackService?.createdAt,
+                                                )
+                                            }
+                                            activity.startVideo(video, offset, qualities = qualities)
+                                        } else {
+                                            (requireActivity() as MainActivity).startVideo(Video(), 0, qualities = qualities)
+                                        }
+                                    } else {
+                                        pendingDvr = false
+                                        (activity as? MainActivity)?.dvrStream = null
+                                        Toast.makeText(requireContext(), R.string.video_not_found, Toast.LENGTH_SHORT).show()
+                                    }
+                                    viewModel.unlistedVideoQualities.value = null
+                                }
+                            }
+                        }
+                    }
+                    if (requireContext().prefs().getBoolean(C.PLAYER_RESTART, true)) {
+                        restart.visibility = View.VISIBLE
+                        restart.setOnClickListener {
+                            showController(force = true)
+                            restartPlayer()
+                        }
+                    }
+                    if (requireContext().prefs().getBoolean(C.PLAYER_SEEK_LIVE, false)) {
+                        seekLive.visibility = View.VISIBLE
+                        seekLive.setOnClickListener {
+                            showController(force = true)
+                            seekToLivePosition()
+                        }
+                    }
+                    if (requireContext().prefs().getBoolean(C.PLAYER_VIEWER_LIST, false)) {
+                        viewersLayout.setOnClickListener {
+                            showController(force = true)
+                            openViewerList()
+                        }
+                    }
+                    if (requireContext().prefs().getBoolean(C.PLAYER_SHOW_UPTIME, true)) {
+                        playbackService?.createdAt?.let {
+                            Instant.parseOrNull(it)?.toEpochMilliseconds()?.takeIf { ms -> ms > 0 }?.let { createdAt ->
+                                updateUptime(createdAt)
+                            }
+                        }
+                    }
+                    // TV: always there for a stream, the row has tabs (followed, popular...) even when the stream came alone
+                    if (isTv && requireContext().prefs().getBoolean(C.TV_BUTTON_STREAM_LIST, true)) {
+                        streamList?.visibility = View.VISIBLE
+                        streamList?.setOnClickListener {
+                            hideController()
+                            (activity as? MainActivity)?.showStreamSwitcher()
+                        }
+                    }
+                    rewind.visibility = View.GONE
+                    fastForward.visibility = View.GONE
+                    if (isTv) {
+                        // TV: timeline of the whole broadcast, going back in it plays the VOD of the stream
+                        updateTvLiveTimeline()
+                    } else {
+                        position.visibility = View.GONE
+                        progressBar.visibility = View.GONE
+                        duration.visibility = View.GONE
+                    }
+                    updateStreamInfo(
+                        playbackService?.title,
+                        playbackService?.gameId,
+                        playbackService?.gameSlug,
+                        playbackService?.gameName
+                    )
+                    updateViewerCount(playbackService?.viewerCount)
+                } else {
+                    if (requireContext().prefs().getBoolean(C.PLAYER_SPEED_BUTTON, true)) {
+                        speed.visibility = View.VISIBLE
+                        speed.setOnClickListener {
+                            showController(force = true)
+                            showSpeedDialog()
+                        }
+                    }
+                }
+                if (playbackService?.type == BasePlaybackService.VIDEO) {
+                    if (requireContext().prefs().getBoolean(C.PLAYER_MENU_BOOKMARK, true)) {
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                                viewModel.isBookmarked.collectLatest {
+                                    if (it != null) {
+                                        (childFragmentManager.findFragmentByTag("closeOnPip") as? PlayerSettingsDialog?)?.setBookmarkText(it)
+                                        viewModel.isBookmarked.value = null
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    if (!playbackService?.videoId.isNullOrBlank() && (requireContext().prefs().getBoolean(C.PLAYER_GAMES_BUTTON, true) || requireContext().prefs().getBoolean(C.PLAYER_MENU_GAMES, false))) {
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                                viewModel.gamesList.collectLatest { list ->
+                                    if (!list.isNullOrEmpty()) {
+                                        if (requireContext().prefs().getBoolean(C.PLAYER_GAMES_BUTTON, true)) {
+                                            vodGames.visibility = View.VISIBLE
+                                            vodGames.setOnClickListener {
+                                                showController(force = true)
+                                                showVodGames()
+                                            }
+                                        }
+                                        (childFragmentManager.findFragmentByTag("closeOnPip") as? PlayerSettingsDialog?)?.setVodGames()
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                if (playbackService?.type == BasePlaybackService.CLIP) {
+                    val videoId = playbackService?.videoId
+                    if (!videoId.isNullOrBlank()) {
+                        binding.watchVideo.visibility = View.VISIBLE
+                        binding.watchVideo.setOnClickListener {
+                            viewLifecycleOwner.lifecycleScope.launch {
+                                val offset = playbackService?.videoOffsetSeconds?.let {
+                                    (it * 1000) + (getCurrentPosition() ?: 0)
+                                } ?: 0
+                                (requireActivity() as MainActivity).startVideo(
+                                    Video(
+                                        id = videoId,
+                                        channelId = playbackService?.channelId,
+                                        channelLogin = playbackService?.channelLogin,
+                                        channelName = playbackService?.channelName,
+                                        channelImageURL = playbackService?.channelImage,
+                                        createdAt = playbackService?.videoCreatedAt,
+                                        animatedPreviewURL = playbackService?.videoAnimatedPreviewURL,
+                                    ),
+                                    offset,
+                                    true
+                                )
+                            }
+                        }
+                    }
+                } else {
+                    if (requireContext().prefs().getBoolean(C.PLAYER_SLEEP, false)) {
+                        sleepTimer.visibility = View.VISIBLE
+                        sleepTimer.setOnClickListener {
+                            showController(force = true)
+                            showSleepTimerDialog()
+                        }
+                    }
+                }
+                if (playbackService?.type != BasePlaybackService.OFFLINE_VIDEO) {
+                    if (playbackService?.loaded == true) {
+                        quality.isEnabled = true
+                        quality.setColorFilter(Color.WHITE)
+
+
+                        audioOnly.isEnabled = true
+                        audioOnly.setColorFilter(Color.WHITE)
+                        setQualityText()
+                    } else {
+                        quality.isEnabled = false
+                        quality.setColorFilter(Color.GRAY)
+
+
+                        audioOnly.isEnabled = false
+                        audioOnly.setColorFilter(Color.GRAY)
+                    }
+
+                    val setting = requireContext().prefs().getString(C.UI_FOLLOW_BUTTON, "0")?.toIntOrNull() ?: 0
+                    if (requireContext().prefs().getBoolean(C.PLAYER_FOLLOW, false) && (setting == 0 || setting == 1)) {
+                        follow.visibility = View.VISIBLE
+                        follow.setOnClickListener {
+                            showController(force = true)
+                            viewModel.isFollowing.value?.let {
+                                if (it) {
+                                    requireContext().getAlertDialogBuilder()
+                                        .setMessage(getString(R.string.unfollow_channel, displayName))
+                                        .setNegativeButton(getString(R.string.no), null)
+                                        .setPositiveButton(getString(R.string.yes)) { _, _ ->
+                                            viewModel.deleteFollowChannel(
+                                                requireContext().tokenPrefs().getString(C.USER_ID, null),
+                                                playbackService?.channelId,
+                                                setting,
+                                                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                                                TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                                                requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                                            )
+                                        }
+                                        .show()
+                                } else {
+                                    viewModel.saveFollowChannel(
+                                        requireContext().tokenPrefs().getString(C.USER_ID, null),
+                                        playbackService?.channelId,
+                                        playbackService?.channelLogin,
+                                        playbackService?.channelName,
+                                        setting,
+                                        requireContext().prefs().getBoolean(C.LIVE_NOTIFICATIONS_ENABLED, false),
+                                        !requireContext().prefs().getBoolean(C.UI_ACTIVATE_NOTIFICATIONS_WHEN_FOLLOWING, true),
+                                        playbackService?.createdAt,
+                                        requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                                        TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                                        requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                                    )
+                                }
+                            }
+                        }
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                                viewModel.isFollowing.collectLatest {
+                                    if (it != null) {
+                                        if (it) {
+                                            follow.setImageResource(R.drawable.baseline_favorite_black_24)
+                                        } else {
+                                            follow.setImageResource(R.drawable.baseline_favorite_border_black_24)
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        viewLifecycleOwner.lifecycleScope.launch {
+                            repeatOnLifecycle(Lifecycle.State.STARTED) {
+                                viewModel.follow.collectLatest { pair ->
+                                    if (pair != null) {
+                                        val following = pair.first
+                                        val errorMessage = pair.second
+                                        if (!errorMessage.isNullOrBlank()) {
+                                            Toast.makeText(requireContext(), errorMessage, Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            if (following) {
+                                                Toast.makeText(requireContext(), getString(R.string.now_following, displayName), Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                Toast.makeText(requireContext(), getString(R.string.unfollowed, displayName), Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                        viewModel.follow.value = null
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            if (isChatOpen) ensureChat()
+        }
+    }
+
+    private fun ensureChat() {
+        if (childFragmentManager.isStateSaved) return
+        val currentChatFragment = (childFragmentManager.findFragmentById(R.id.chatFragmentContainer) as? ChatFragment)
+        if (currentChatFragment != null) {
+            chatFragment = currentChatFragment
+        } else {
+            val fragment = when (playbackService?.type) {
+                BasePlaybackService.STREAM -> ChatFragment.newInstance(
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    playbackService?.channelName,
+                    playbackService?.streamId,
+                )
+                BasePlaybackService.VIDEO -> ChatFragment.newInstance(
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    // a live watched back in time: the chat of the VOD being recorded
+                    playbackService?.videoId ?: (activity as? MainActivity)?.takeIf { it.dvrStream != null }?.dvrChatVideoId,
+                    playbackService?.createdAt,
+                    0,
+                )
+                BasePlaybackService.CLIP -> ChatFragment.newInstance(
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    playbackService?.videoId,
+                    playbackService?.videoCreatedAt,
+                    playbackService?.videoOffsetSeconds.takeIf { it != -1 },
+                )
+                BasePlaybackService.OFFLINE_VIDEO -> ChatFragment.newLocalInstance(
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    playbackService?.videoCreatedAt ?: playbackService?.createdAt?.takeIf { playbackService?.clipId == null },
+                    playbackService?.chatUrl,
+                )
+                else -> null
+            }
+            if (fragment != null) {
+                childFragmentManager.beginTransaction().replace(R.id.chatFragmentContainer, fragment).commitNow()
+                android.util.Log.i("PlaybackDiagnostics", "chat=manually_opened")
+            }
+            chatFragment = fragment
+        }
+    }
+
+    private fun initLayout() {
+        with(binding) {
+            if (isPortrait) {
+                requireActivity().window.decorView.setOnSystemUiVisibilityChangeListener(null)
+                showStatusBar()
+                playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                    width = ViewGroup.LayoutParams.MATCH_PARENT
+                    height = ViewGroup.LayoutParams.MATCH_PARENT
+                    marginEnd = 0
+                }
+                chatLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                    width = ViewGroup.LayoutParams.MATCH_PARENT
+                    height = ViewGroup.LayoutParams.MATCH_PARENT
+                    gravity = Gravity.BOTTOM
+                }
+                if (isMaximized) {
+                    chatLayout.visibility = View.VISIBLE
+                } else {
+                    chatLayout.visibility = View.GONE
+                    val (minimizedScaleX, minimizedScaleY) = getScaleValues()
+                    slidingLayout.scaleX = minimizedScaleX
+                    slidingLayout.scaleY = minimizedScaleY
+                    slidingLayout.doOnPreDraw {
+                        val (minimizedScaleX, minimizedScaleY) = getScaleValues()
+                        val windowInsets = ViewCompat.getRootWindowInsets(requireView())
+                        val insets = windowInsets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                        val keyboardInsets = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom?.let { if (it > 0) it - (insets?.bottom ?: 0) else it } ?: 0
+                        val playerHeight = (slidingLayout.width / (16f / 9f)).toInt()
+                        val scaledXDiff = (slidingLayout.width * (1f - minimizedScaleX)) / 2
+                        val scaledYDiff = (slidingLayout.height * (1f - minimizedScaleY)) / 2
+                        val navBarHeight = requireView().rootView.findViewById<LinearLayout>(R.id.navBarContainer)?.height?.takeIf { it > 0 }?.let { it - keyboardInsets } ?: (insets?.bottom ?: 0)
+                        val newX = slidingLayout.width - (insets?.right ?: 0) - (slidingLayout.width * minimizedScaleX) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 20F, resources.displayMetrics) * minimizedScaleX)
+                        val newY = slidingLayout.height - navBarHeight - (playerHeight * minimizedScaleY) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 30F, resources.displayMetrics) * minimizedScaleY)
+                        slidingLayout.translationX = 0f - scaledXDiff - ((insets?.left ?: 0) * minimizedScaleX) + newX
+                        slidingLayout.translationY = 0f - scaledYDiff - ((insets?.top ?: 0) * minimizedScaleY) + newY
+                    }
+                }
+                aspectRatioFrameLayout.resizeMode = AspectRatioFrameLayout.RESIZE_MODE_FIT
+                playerLayout.isPortrait = true
+                chatLayout.isPortrait = true
+                with(playerControls) {
+                    if (requireContext().prefs().getBoolean(C.PLAYER_FULLSCREEN, true) && !isTv) {
+                        fullscreen.visibility = View.VISIBLE
+                        fullscreen.setImageResource(R.drawable.baseline_fullscreen_black_24)
+                        fullscreen.setOnClickListener {
+                            showController(force = true)
+                            requireActivity().requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE
+                        }
+                    }
+                    aspectRatio.visibility = View.GONE
+                    toggleChat.visibility = View.GONE
+                }
+            } else {
+                requireActivity().window.decorView.setOnSystemUiVisibilityChangeListener {
+                    if (!isKeyboardShown && isMaximized && activity != null) {
+                        hideStatusBar()
+                    }
+                }
+                if (isMaximized) {
+                    hideStatusBar()
+                    val chatWidth = if (isChatOpen) chatWidthLandscape else 0
+                    playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = ViewGroup.LayoutParams.MATCH_PARENT
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                        marginEnd = chatWidth
+                    }
+                    chatLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = chatWidthLandscape
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                        gravity = Gravity.END
+                    }
+                    if (isChatOpen) {
+                        chatLayout.visibility = View.VISIBLE
+                        if (requireView().findViewById<Button>(R.id.btnDown)?.isVisible == false) {
+                            requireView().findViewById<RecyclerView>(R.id.recyclerView)?.let { recyclerView ->
+                                recyclerView.adapter?.itemCount?.let { recyclerView.scrollToPosition(it - 1) }
+                            }
+                        }
+                    } else {
+                        chatLayout.visibility = View.GONE
+                    }
+                    if (isTv) {
+                        // full screen video, chat as an overlay
+                        if (isChatOpen) {
+                            showChatLayout()
+                        } else {
+                            hideChatLayout()
+                        }
+                    }
+                } else {
+                    showStatusBar()
+                    playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = ViewGroup.LayoutParams.MATCH_PARENT
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                        marginEnd = 0
+                    }
+                    chatLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = chatWidthLandscape
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                        gravity = Gravity.END
+                    }
+                    chatLayout.visibility = View.GONE
+                    val (minimizedScaleX, minimizedScaleY) = getScaleValues()
+                    slidingLayout.scaleX = minimizedScaleX
+                    slidingLayout.scaleY = minimizedScaleY
+                    slidingLayout.doOnPreDraw {
+                        val (minimizedScaleX, minimizedScaleY) = getScaleValues()
+                        val windowInsets = ViewCompat.getRootWindowInsets(requireView())
+                        val insets = windowInsets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                        val keyboardInsets = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom?.let { if (it > 0) it - (insets?.bottom ?: 0) else it } ?: 0
+                        val playerWidth = slidingLayout.width - getHorizontalInsets(windowInsets)
+                        val scaledXDiff = (slidingLayout.width * (1f - minimizedScaleX)) / 2
+                        val scaledYDiff = (slidingLayout.height * (1f - minimizedScaleY)) / 2
+                        val navBarHeight = requireView().rootView.findViewById<LinearLayout>(R.id.navBarContainer)?.height?.takeIf { it > 0 }?.let { it - keyboardInsets } ?: (insets?.bottom ?: 0)
+                        val newX = slidingLayout.width - (insets?.right ?: 0) - (playerWidth * minimizedScaleX) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 20F, resources.displayMetrics) * minimizedScaleX)
+                        val newY = slidingLayout.height - navBarHeight - (slidingLayout.height * minimizedScaleY) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 30F, resources.displayMetrics) * minimizedScaleY)
+                        slidingLayout.translationX = 0f - scaledXDiff - ((insets?.left ?: 0) * minimizedScaleX) + newX
+                        slidingLayout.translationY = 0f - scaledYDiff - ((insets?.top ?: 0) * minimizedScaleY) + newY
+                    }
+                }
+                aspectRatioFrameLayout.resizeMode = resizeMode
+                playerLayout.isPortrait = false
+                chatLayout.isPortrait = false
+                with(playerControls) {
+                    if (requireContext().prefs().getBoolean(C.PLAYER_FULLSCREEN, true) && !isTv) {
+                        fullscreen.visibility = View.VISIBLE
+                        fullscreen.setImageResource(R.drawable.baseline_fullscreen_exit_black_24)
+                        fullscreen.setOnClickListener {
+                            showController(force = true)
+                            requireActivity().requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_PORTRAIT
+                            requireActivity().requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                        }
+                    }
+                    if (requireContext().prefs().getBoolean(C.PLAYER_ASPECT, true) && !isTv) {
+                        aspectRatio.visibility = View.VISIBLE
+                        aspectRatio.setOnClickListener {
+                            showController(force = true)
+                            setResizeMode()
+                        }
+                    }
+                    if (requireContext().prefs().getBoolean(C.PLAYER_CHAT_TOGGLE, true) && !requireContext().prefs().getBoolean(C.CHAT_DISABLE, false)) {
+                        toggleChat.visibility = View.VISIBLE
+                        if (isChatOpen) {
+                            toggleChat.setImageResource(R.drawable.baseline_speaker_notes_off_black_24)
+                            toggleChat.setOnClickListener {
+                                showController(force = true)
+                                hideChat()
+                            }
+                        } else {
+                            toggleChat.setImageResource(R.drawable.baseline_speaker_notes_black_24)
+                            toggleChat.setOnClickListener {
+                                showController(force = true)
+                                showChat()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fun setResizeMode() {
+        resizeMode = (resizeMode + 1).let { if (it < 5) it else 0 }
+        binding.aspectRatioFrameLayout.resizeMode = resizeMode
+        requireContext().prefs().edit { putInt(C.ASPECT_RATIO_LANDSCAPE, resizeMode) }
+    }
+
+    fun showSleepTimerDialog() {
+        if (requireContext().prefs().getBoolean(C.SLEEP_TIMER_USE_TIME_PICKER, false)) {
+            if (((activity as? MainActivity)?.getSleepTimerTimeLeft() ?: 0) > 0L) {
+                requireContext().getAlertDialogBuilder()
+                    .setMessage(getString(R.string.stop_sleep_timer_message))
+                    .setPositiveButton(getString(R.string.yes)) { _, _ ->
+                        onSleepTimerChanged(-1L, 0, 0, requireContext().prefs().getBoolean(C.SLEEP_TIMER_LOCK, false))
+                    }
+                    .setNegativeButton(getString(R.string.no), null)
+                    .show()
+            } else {
+                val savedValue = requireContext().prefs().getInt(C.SLEEP_TIMER_TIME, 15)
+                val picker = MaterialTimePicker.Builder()
+                    .setTimeFormat(if (DateFormat.is24HourFormat(requireContext())) TimeFormat.CLOCK_24H else TimeFormat.CLOCK_12H)
+                    .setInputMode(MaterialTimePicker.INPUT_MODE_CLOCK)
+                    .setHour(savedValue / 60)
+                    .setMinute(savedValue % 60)
+                    .build()
+                picker.addOnPositiveButtonClickListener {
+                    val minutes = TwitchApiHelper.getMinutesLeft(picker.hour, picker.minute)
+                    onSleepTimerChanged(minutes * 60_000L, minutes / 60, minutes % 60, requireContext().prefs().getBoolean(C.SLEEP_TIMER_LOCK, false))
+                    requireContext().prefs().edit {
+                        putInt(C.SLEEP_TIMER_TIME, picker.hour * 60 + picker.minute)
+                    }
+                }
+                picker.show(childFragmentManager, null)
+            }
+        } else {
+            SleepTimerDialog.newInstance((activity as? MainActivity)?.getSleepTimerTimeLeft() ?: 0).show(childFragmentManager, null)
+        }
+    }
+
+    fun getQualities(): List<Pair<String, VideoQuality>>? {
+        val qualities = playbackService?.qualities
+        return if (!qualities.isNullOrEmpty()) {
+            val hideCodecs = qualities.all {
+                val codec = it.codecs?.substringBefore('.')
+                codec == "avc1" || codec == "mp4a" || codec.isNullOrBlank()
+            }
+            qualities.map { quality ->
+                when (quality.name) {
+                    VideoQuality.AUTO_QUALITY -> getString(R.string.auto)
+                    VideoQuality.SOURCE_QUALITY -> getString(R.string.source)
+                    VideoQuality.AUDIO_ONLY_QUALITY -> getString(R.string.audio_only)
+                    VideoQuality.CHAT_ONLY_QUALITY -> getString(R.string.chat_only)
+                    else -> {
+                        val frameRate = quality.name?.substringAfter("p", "")?.takeWhile { it.isDigit() }?.toIntOrNull()
+                        val qualityName = if (frameRate != null && frameRate <= 30) {
+                            quality.name.substring(0, quality.name.indexOf('p') + 1)
+                        } else {
+                            quality.name.toString()
+                        }
+                        if (hideCodecs) {
+                            qualityName
+                        } else {
+                            val codec = quality.codecs?.substringBefore('.')
+                            val codecName = when {
+                                codec == "av01" -> "AV1"
+                                codec == "hev1" || codec == "hvc1" -> "H.265"
+                                codec == "avc1" || codec.isNullOrBlank() -> "H.264"
+                                else -> codec
+                            }
+                            "$qualityName $codecName"
+                        }
+                    }
+                } to quality
+            }
+        } else null
+    }
+
+    fun showQualityDialog() {
+        val qualities = getQualities()
+        if (!qualities.isNullOrEmpty()) {
+            RadioButtonDialogFragment.newInstance(
+                REQUEST_CODE_QUALITY,
+                qualities.map { it.first },
+                qualities.map { it.second.name.toString() }.toTypedArray(),
+                qualities.map { it.second.url.toString() }.toTypedArray(),
+                qualities.indexOf(qualities.find { it.second.name == playbackService?.quality?.name && it.second.url == playbackService?.quality?.url })
+            ).show(childFragmentManager, "closeOnPip")
+        }
+    }
+
+    fun showSpeedDialog() {
+        val speed = getCurrentSpeed()
+        if (speed != null) {
+            val speedList = requireContext().prefs().getString(C.PLAYER_SPEED_LIST, "0.25\n0.5\n0.75\n1.0\n1.25\n1.5\n1.75\n2.0\n3.0\n4.0\n8.0")?.split("\n")
+            if (speedList != null) {
+                RadioButtonDialogFragment.newInstance(
+                    REQUEST_CODE_SPEED,
+                    speedList,
+                    checkedIndex = speedList.indexOf(speed.toString())
+                ).show(childFragmentManager, "closeOnPip")
+            }
+        }
+    }
+
+    fun showVolumeDialog() {
+        PlayerVolumeDialog.newInstance(getCurrentVolume()).show(childFragmentManager, "closeOnPip")
+    }
+
+    fun getTranslateAllMessages(): Boolean? = null
+
+    fun saveTranslatedChannel() {
+        playbackService?.channelId?.let {
+            chatFragment?.saveTranslatedChannel(it)
+        }
+    }
+
+    fun deleteTranslatedChannel() {
+        playbackService?.channelId?.let {
+            chatFragment?.deleteTranslatedChannel(it)
+        }
+    }
+
+    fun toggleChatBar() {
+        with(binding) {
+            requireView().findViewById<LinearLayout>(R.id.messageView)?.let {
+                if (it.isVisible) {
+                    (requireContext().getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(chatLayout.windowToken, 0)
+                    chatLayout.clearFocus()
+                    if (playbackService?.type == BasePlaybackService.STREAM && chatFragment?.emoteMenuIsVisible() == true) {
+                        chatFragment?.toggleEmoteMenu(false)
+                    }
+                    it.visibility = View.GONE
+                    requireContext().prefs().edit { putBoolean(C.KEY_CHAT_BAR_VISIBLE, false) }
+                } else {
+                    it.visibility = View.VISIBLE
+                    requireContext().prefs().edit { putBoolean(C.KEY_CHAT_BAR_VISIBLE, true) }
+                }
+            }
+        }
+    }
+
+    fun hideChat() {
+        if (childFragmentManager.isStateSaved) return
+        isChatOpen = false
+        chatFragment?.let { fragment ->
+            if (!childFragmentManager.isStateSaved) {
+                childFragmentManager.beginTransaction().remove(fragment).commitNow()
+                chatFragment = null
+                android.util.Log.i("PlaybackDiagnostics", "chat=disconnected")
+            }
+        }
+        hideChatLayout()
+        if (requireContext().prefs().getBoolean(C.PLAYER_CHAT_TOGGLE, true)) {
+            binding.playerControls.toggleChat.apply {
+                visibility = View.VISIBLE
+                setImageResource(R.drawable.baseline_speaker_notes_black_24)
+                setOnClickListener {
+                    showController(force = true)
+                    showChat()
+                }
+            }
+        }
+        requireContext().prefs().edit { putBoolean(C.KEY_CHAT_OPENED, false) }
+    }
+
+    fun showChat() {
+        if (childFragmentManager.isStateSaved) return
+        isChatOpen = true
+        ensureChat()
+        showChatLayout()
+        if (requireContext().prefs().getBoolean(C.PLAYER_CHAT_TOGGLE, true)) {
+            binding.playerControls.toggleChat.apply {
+                visibility = View.VISIBLE
+                setImageResource(R.drawable.baseline_speaker_notes_off_black_24)
+                setOnClickListener {
+                    showController(force = true)
+                    hideChat()
+                }
+            }
+        }
+        requireContext().prefs().edit { putBoolean(C.KEY_CHAT_OPENED, true) }
+        if (requireView().findViewById<Button>(R.id.btnDown)?.isVisible == false) {
+            requireView().findViewById<RecyclerView>(R.id.recyclerView)?.let { recyclerView ->
+                recyclerView.adapter?.itemCount?.let { recyclerView.scrollToPosition(it - 1) }
+            }
+        }
+    }
+
+    private fun hideChatLayout() {
+        with(binding) {
+            playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                width = ViewGroup.LayoutParams.MATCH_PARENT
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+                gravity = Gravity.NO_GRAVITY
+                marginEnd = 0
+            }
+            (requireContext().getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(chatLayout.windowToken, 0)
+            chatLayout.clearFocus()
+            chatLayout.visibility = View.GONE
+        }
+    }
+
+    private fun showChatLayout() {
+        with(binding) {
+            if (isTv) {
+                applyTvChatLayout()
+                chatLayout.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                chatLayout.visibility = View.VISIBLE
+                return
+            }
+            playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                width = ViewGroup.LayoutParams.MATCH_PARENT
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+                marginEnd = chatWidthLandscape
+            }
+            chatLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                width = chatWidthLandscape
+                height = ViewGroup.LayoutParams.MATCH_PARENT
+                gravity = Gravity.END
+            }
+            chatLayout.visibility = View.VISIBLE
+        }
+    }
+
+    fun setQualityText() {
+        (childFragmentManager.findFragmentByTag("closeOnPip") as? PlayerSettingsDialog?)?.let { dialog ->
+            val label = getQualities()?.find { it.second == playbackService?.quality }?.first
+            dialog.setQuality(label)
+        }
+    }
+
+    fun updateViewerCount(viewerCount: Int?) {
+        with(binding.playerControls) {
+            if (viewerCount != null) {
+                viewersText.text = TwitchApiHelper.formatCount(viewerCount, requireContext().prefs().getBoolean(C.UI_TRUNCATE_VIEW_COUNT, true))
+                if (requireContext().prefs().getBoolean(C.PLAYER_VIEWER_ICON, true)) {
+                    viewersIcon.visibility = View.VISIBLE
+                }
+            } else {
+                viewersText.text = null
+                viewersIcon.visibility = View.GONE
+            }
+            if (isTv) {
+                // TV: the badge has a background, an empty one stays hidden (videos, clips)
+                viewersLayout.visibility = if (viewerCount != null) View.VISIBLE else View.GONE
+            }
+        }
+    }
+
+    fun updateLiveStatus(live: Boolean, serverTime: Long?, channelLogin: String?) {
+        if (channelLogin == playbackService?.channelLogin) {
+            if (live) {
+                restartPlayer()
+            }
+            updateUptime(serverTime?.times(1000))
+        }
+    }
+
+    private fun updateUptime(uptimeMs: Long?) {
+        with(binding.playerControls) {
+            uptimeTimer.stop()
+            if (uptimeMs != null && requireContext().prefs().getBoolean(C.PLAYER_SHOW_UPTIME, true)) {
+                uptimeLayout.visibility = View.VISIBLE
+                uptimeTimer.base = SystemClock.elapsedRealtime() + uptimeMs - System.currentTimeMillis()
+                uptimeTimer.start()
+                if (requireContext().prefs().getBoolean(C.PLAYER_VIEWER_ICON, true)) {
+                    uptimeIcon.visibility = View.VISIBLE
+                } else {
+                    uptimeIcon.visibility = View.GONE
+                }
+            } else {
+                uptimeLayout.visibility = View.GONE
+            }
+        }
+    }
+
+    fun updateStreamInfo(title: String?, gameId: String?, gameSlug: String?, gameName: String?) {
+        playbackService?.title = title
+        playbackService?.gameId = gameId
+        playbackService?.gameSlug = gameSlug
+        playbackService?.gameName = gameName
+        binding.playerControls.title.apply {
+            if (!title.isNullOrBlank() && requireContext().prefs().getBoolean(C.PLAYER_TITLE, true)) {
+                text = title.trim()
+                visibility = View.VISIBLE
+            } else {
+                text = null
+                visibility = View.GONE
+            }
+        }
+        binding.playerControls.category.apply {
+            if (!gameName.isNullOrBlank() && requireContext().prefs().getBoolean(C.PLAYER_CATEGORY, true)) {
+                text = gameName
+                visibility = View.VISIBLE
+                setOnClickListener {
+                    findNavController().navigate(
+                        if (requireContext().prefs().getBoolean(C.UI_GAME_PAGER, true)) {
+                            GamePagerFragmentDirections.actionGlobalGamePagerFragment(
+                                gameId = gameId,
+                                gameSlug = gameSlug,
+                                gameName = gameName
+                            )
+                        } else {
+                            GameMediaFragmentDirections.actionGlobalGameMediaFragment(
+                                gameId = gameId,
+                                gameSlug = gameSlug,
+                                gameName = gameName
+                            )
+                        }
+                    )
+                    minimize()
+                }
+            } else {
+                text = null
+                visibility = View.GONE
+            }
+        }
+        updateTvAvatars()
+    }
+
+    fun openViewerList() {
+        playbackService?.channelLogin?.let { login ->
+            PlayerViewerListDialog.newInstance(login).show(childFragmentManager, "closeOnPip")
+        }
+    }
+
+    fun showVodGames() {
+        viewModel.gamesList.value?.let {
+            PlayerGamesDialog.newInstance(it).show(childFragmentManager, "closeOnPip")
+        }
+    }
+
+    fun checkBookmark() {
+        playbackService?.videoId?.let { viewModel.checkBookmark(it) }
+    }
+
+    fun saveBookmark() {
+        viewModel.saveBookmark(
+            filesDir = requireContext().filesDir.path,
+            networkLibrary = requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+            helixHeaders = TwitchApiHelper.getHelixHeaders(requireContext()),
+            gqlHeaders = TwitchApiHelper.getGQLHeaders(requireContext()),
+            videoId = playbackService?.videoId,
+            title = playbackService?.title,
+            uploadDate = playbackService?.createdAt,
+            durationSeconds = playbackService?.durationSeconds,
+            type = playbackService?.videoType,
+            animatedPreviewUrl = playbackService?.videoAnimatedPreviewURL,
+            channelId = playbackService?.channelId,
+            channelLogin = playbackService?.channelLogin,
+            channelName = playbackService?.channelName,
+            channelImage = playbackService?.channelImage,
+            thumbnail = playbackService?.thumbnail,
+            gameId = playbackService?.gameId,
+            gameSlug = playbackService?.gameSlug,
+            gameName = playbackService?.gameName,
+        )
+    }
+
+    fun share() {
+        when (playbackService?.type) {
+            BasePlaybackService.STREAM -> {
+                playbackService?.channelLogin?.let { channelLogin ->
+                    startActivity(Intent.createChooser(Intent().apply {
+                        action = Intent.ACTION_SEND
+                        putExtra(Intent.EXTRA_TEXT, "https://twitch.tv/${channelLogin}")
+                        playbackService?.channelName?.let {
+                            putExtra(Intent.EXTRA_TITLE, it)
+                        }
+                        type = "text/plain"
+                    }, null))
+                }
+            }
+            BasePlaybackService.VIDEO -> {
+                playbackService?.videoId?.let { videoId ->
+                    val position = getCurrentPosition()?.let { position ->
+                        val totalSeconds = position / 1000
+                        val hours = (totalSeconds / 3600).let { if (it < 10) "0$it" else "$it" }
+                        val minutes = ((totalSeconds % 3600) / 60).let { if (it < 10) "0$it" else "$it" }
+                        val seconds = (totalSeconds % 60).let { if (it < 10) "0$it" else "$it" }
+                        "?t=${hours}h${minutes}m${seconds}s"
+                    } ?: ""
+                    startActivity(Intent.createChooser(Intent().apply {
+                        action = Intent.ACTION_SEND
+                        putExtra(Intent.EXTRA_TEXT, "https://twitch.tv/videos/${videoId}${position}")
+                        playbackService?.title?.let {
+                            putExtra(Intent.EXTRA_TITLE, it)
+                        }
+                        type = "text/plain"
+                    }, null))
+                }
+            }
+            BasePlaybackService.CLIP -> {
+                playbackService?.clipId?.let { clipId ->
+                    playbackService?.channelLogin?.let { channelLogin ->
+                        startActivity(Intent.createChooser(Intent().apply {
+                            action = Intent.ACTION_SEND
+                            putExtra(Intent.EXTRA_TEXT, "https://twitch.tv/${channelLogin}/clip/${clipId}")
+                            playbackService?.title?.let {
+                                putExtra(Intent.EXTRA_TITLE, it)
+                            }
+                            type = "text/plain"
+                        }, null))
+                    }
+                }
+            }
+            BasePlaybackService.OFFLINE_VIDEO -> {
+                playbackService?.quality?.url?.let { videoUrl ->
+                    val uri = if (videoUrl.endsWith(".m3u8")) {
+                        videoUrl.substringBefore("%2F").toUri()
+                    } else {
+                        videoUrl.toUri()
+                    }
+                    startActivity(Intent.createChooser(Intent().apply {
+                        action = Intent.ACTION_SEND
+                        setDataAndType(uri, requireContext().contentResolver.getType(uri))
+                        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+                        addFlags(Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION)
+                        playbackService?.title?.let {
+                            putExtra(Intent.EXTRA_TITLE, it)
+                        }
+                    }, null))
+                }
+            }
+        }
+    }
+
+    fun changePlayerMode() {
+        with(binding) {
+            if (canEnterPictureInPicture()) {
+                if (!controllerHideOnTouch && !controllerIsAnimating && controllerAutoHide && !binding.playerControls.progressBar.isPressed) {
+                    playerControls.root.postDelayed(controllerHideAction, controllerHideDelay)
+                }
+                controllerHideOnTouch = true
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    requireActivity().packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
+                    requireContext().prefs().getBoolean(C.PLAYER_PICTURE_IN_PICTURE, true)
+                ) {
+                    requireActivity().setPictureInPictureParams(PictureInPictureParams.Builder().setAutoEnterEnabled(true).build())
+                }
+            } else {
+                controllerHideOnTouch = false
+                showController(force = true)
+                updateProgress()
+                requireView().keepScreenOn = true
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S &&
+                    requireActivity().packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE)
+                ) {
+                    requireActivity().setPictureInPictureParams(PictureInPictureParams.Builder().setAutoEnterEnabled(false).build())
+                }
+            }
+        }
+    }
+
+    fun isMaximizedPlayer() = _binding != null && isMaximized
+
+    /** TV: the controls (buttons, timeline) are on screen. */
+    fun areControlsShown() = _binding?.playerControls?.root?.isVisible == true
+
+    fun isPlayingStreamMaximized() = _binding != null && isMaximized && playbackService?.type == BasePlaybackService.STREAM
+
+    /** Gives the focus to the player when it is maximized, returns false if it is not. */
+    fun requestPlayerFocus(): Boolean {
+        if (_binding == null || !isMaximized) {
+            return false
+        }
+        return binding.dragView.requestFocus()
+    }
+
+    private var tvScrubPosition = -1L
+    private var pendingDvr = false
+    private var pendingDvrPosition = 0L
+
+    protected fun isTvLiveTimeline() = isTv && playbackService?.type == BasePlaybackService.STREAM
+
+    /** VOD of a live stream opened from its timeline, the end of its timeline goes back to the live. */
+    private fun getTvDvrStream(): Stream? {
+        return (activity as? MainActivity)?.dvrStream?.takeIf {
+            isTv && playbackService?.type == BasePlaybackService.VIDEO && playbackService?.videoId == null && it.channelLogin == playbackService?.channelLogin
+        }
+    }
+
+    /**
+     * VOD of a live opened from its timeline: once it catches up with the live (played faster, x2 or x4), the live
+     * starts again instead of waiting for the next parts of the VOD being recorded.
+     */
+    private fun checkTvDvrCaughtUp() {
+        val dvrStream = getTvDvrStream() ?: return
+        if (_binding == null || tvScrubPosition >= 0 || !isPlayingOrLoading()) {
+            return
+        }
+        val duration = getTotalDuration()?.takeIf { it > LIVE_EDGE_MS * 2 } ?: return
+        val position = getCurrentPosition() ?: return
+        if (position >= duration - DVR_CAUGHT_UP_MS) {
+            (activity as? MainActivity)?.startStream(dvrStream)
+        }
+    }
+
+    private fun getStreamUptime(): Long? {
+        return playbackService?.createdAt?.let { Instant.parseOrNull(it)?.toEpochMilliseconds() }?.let { System.currentTimeMillis() - it }?.takeIf { it > 0 }
+    }
+
+    protected fun updateTvLiveTimeline() {
+        if (_binding == null || tvScrubPosition >= 0) {
+            return
+        }
+        with(binding.playerControls) {
+            val uptime = getStreamUptime()
+            if (uptime == null) {
+                progressBar.visibility = View.GONE
+                position.visibility = View.GONE
+                duration.visibility = View.GONE
+                return
+            }
+            progressBar.visibility = View.VISIBLE
+            position.visibility = View.VISIBLE
+            duration.visibility = View.VISIBLE
+            progressBar.setDuration(uptime)
+            progressBar.setPosition(uptime)
+            progressBar.setBufferedPosition(uptime)
+            position.text = getString(R.string.tv_live)
+            duration.text = DateUtils.formatElapsedTime(uptime / 1000)
+        }
+    }
+
+    private fun startTvDvr(position: Long) {
+        pendingDvr = true
+        pendingDvrPosition = position
+        (activity as? MainActivity)?.dvrStream = Stream(
+            id = playbackService?.streamId,
+            channelId = playbackService?.channelId,
+            channelLogin = playbackService?.channelLogin,
+            channelName = playbackService?.channelName,
+            gameId = playbackService?.gameId,
+            gameSlug = playbackService?.gameSlug,
+            gameName = playbackService?.gameName,
+            title = playbackService?.title,
+            createdAt = playbackService?.createdAt,
+            viewerCount = playbackService?.viewerCount,
+        )
+        Toast.makeText(requireContext(), R.string.tv_looking_for_vod, Toast.LENGTH_SHORT).show()
+        findUnlistedVideo()
+    }
+
+    /**
+     * D-pad seeking on the time bar: a short press moves 10 seconds (a minute back from the live), holding the key moves faster and faster.
+     * The player seeks once, when the key is released.
+     */
+    private fun onTimeBarKey(keyCode: Int, event: KeyEvent): Boolean {
+        if (keyCode != KeyEvent.KEYCODE_DPAD_LEFT && keyCode != KeyEvent.KEYCODE_DPAD_RIGHT) {
+            return false
+        }
+        val isLive = isTvLiveTimeline()
+        val duration = (if (isLive) getStreamUptime() else getTotalDuration())?.takeIf { it > 0 } ?: return false
+        with(binding.playerControls) {
+            when (event.action) {
+                KeyEvent.ACTION_DOWN -> {
+                    if (tvScrubPosition < 0) {
+                        tvScrubPosition = if (isLive) duration else getCurrentPosition() ?: 0
+                        progressBar.isPressed = true
+                    }
+                    // the longer the key is held, the faster it goes, relative to the length of the video
+                    val step = when {
+                        event.repeatCount < 4 -> 10_000L
+                        event.repeatCount < 12 -> maxOf(30_000L, duration / 300)
+                        event.repeatCount < 24 -> maxOf(60_000L, duration / 120)
+                        else -> maxOf(120_000L, duration / 50)
+                    }.let {
+                        // on the live: the first step back goes a minute back, right into the VOD, small steps never get past its edge
+                        if (isLive && keyCode == KeyEvent.KEYCODE_DPAD_LEFT && tvScrubPosition >= duration - LIVE_EDGE_MS) maxOf(it, LIVE_FIRST_STEP_MS) else it
+                    }
+                    tvScrubPosition = (tvScrubPosition + if (keyCode == KeyEvent.KEYCODE_DPAD_LEFT) -step else step).coerceIn(0, duration)
+                    progressBar.setDuration(duration)
+                    progressBar.setPosition(tvScrubPosition)
+                    position.text = DateUtils.formatElapsedTime(tvScrubPosition / 1000)
+                    seekPreview?.show(tvScrubPosition, duration)
+                    root.removeCallbacks(controllerHideAction)
+                }
+                KeyEvent.ACTION_UP -> {
+                    if (tvScrubPosition >= 0) {
+                        val newPosition = tvScrubPosition
+                        tvScrubPosition = -1
+                        progressBar.isPressed = false
+                        seekPreview?.hideLater()
+                        val dvrStream = getTvDvrStream()
+                        when {
+                            isLive -> {
+                                if (newPosition < duration - LIVE_EDGE_MS) {
+                                    startTvDvr(newPosition)
+                                } else {
+                                    updateTvLiveTimeline()
+                                    showController()
+                                }
+                            }
+                            dvrStream != null && newPosition >= duration - LIVE_EDGE_MS -> (activity as? MainActivity)?.startStream(dvrStream)
+                            else -> {
+                                seek(newPosition)
+                                showController()
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        return true
+    }
+
+    private var tvStatsView: TextView? = null
+    private var seekPreview: TvSeekPreview? = null
+
+    /** Storyboard description of a video: the seekPreviewsURL of the video, else next to its animated preview. */
+    private suspend fun getStoryboardUrl(videoId: String, animatedPreviewUrl: String?): String? {
+        val seekPreviews = try {
+            (requireContext().applicationContext as com.github.andreyasadchy.xtra.XtraApp).xtraModule.graphQLRepository.loadQueryVideo(
+                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                TwitchApiHelper.getGQLHeaders(requireContext()),
+                videoId
+            ).data?.video?.let { it.seekPreviewsURL ?: it.animatedPreviewURL?.let { preview -> "${preview.substringBeforeLast("/")}/$videoId-info.json" } }
+        } catch (e: Exception) {
+            null
+        }
+        return seekPreviews ?: animatedPreviewUrl?.let { "${it.substringBeforeLast("/")}/$videoId-info.json" }
+    }
+
+    /** Live: thumbnails come from the storyboards of the VOD being recorded. */
+    private fun setupLiveSeekPreview() {
+        val login = playbackService?.channelLogin ?: return
+        val preview = createSeekPreview()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val url = getLiveStoryboardUrl(login, playbackService?.createdAt)
+            if (url != null && view != null) {
+                preview.load(url, refresh = true)
+            }
+        }
+    }
+
+    private fun createSeekPreview(): TvSeekPreview {
+        return TvSeekPreview(
+            viewLifecycleOwner.lifecycleScope,
+            (requireContext().applicationContext as com.github.andreyasadchy.xtra.XtraApp).xtraModule.okHttpClient.value,
+            binding.playerControls.root,
+            binding.playerControls.progressBar,
+        ).also { seekPreview = it }
+    }
+
+    /** Storyboards of the VOD being recorded of a live stream: the last archive of the channel, started with the stream. */
+    private suspend fun getLiveStoryboardUrl(login: String, streamCreatedAt: String?): String? {
+        val video = try {
+            (requireContext().applicationContext as com.github.andreyasadchy.xtra.XtraApp).xtraModule.graphQLRepository.loadQueryUserVideos(
+                requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                null,
+                login,
+                com.github.andreyasadchy.xtra.graphql.type.VideoSort.TIME,
+                listOf(com.github.andreyasadchy.xtra.graphql.type.BroadcastType.ARCHIVE),
+                1,
+                null
+            ).data?.user?.videos?.edges?.firstOrNull()?.node
+        } catch (e: Exception) {
+            null
+        }
+        val streamStart = streamCreatedAt?.let { Instant.parseOrNull(it)?.toEpochMilliseconds() }
+        val videoStart = video?.createdAt?.toString()?.let { Instant.parseOrNull(it)?.toEpochMilliseconds() }
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d("XtraTv", "seekPreview live video=${video?.id} videoStart=$videoStart streamStart=$streamStart")
+        }
+        // only the VOD of the current broadcast
+        if (video?.id == null || view == null || (streamStart != null && videoStart != null && kotlin.math.abs(videoStart - streamStart) > 15 * 60_000L)) {
+            return null
+        }
+        val url = getStoryboardUrl(video.id, video.animatedPreviewURL)
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d("XtraTv", "seekPreview live storyboard=$url")
+        }
+        return url
+    }
+
+    /** TV: storyboard thumbnails above the timeline of VODs. */
+    private fun setupSeekPreview() {
+        if (!isTv || seekPreview != null) {
+            return
+        }
+        if (playbackService?.type == BasePlaybackService.STREAM) {
+            setupLiveSeekPreview()
+            return
+        }
+        if (playbackService?.type != BasePlaybackService.VIDEO) {
+            return
+        }
+        val videoId = playbackService?.videoId?.takeIf { it.isNotBlank() }
+        val dvrStream = getTvDvrStream()
+        // the VOD of a live opened from its timeline is found by its address, without its id: it is looked up like on the live
+        val login = dvrStream?.channelLogin ?: playbackService?.channelLogin
+        if (videoId == null && (dvrStream == null || login == null)) {
+            return
+        }
+        val preview = createSeekPreview()
+        viewLifecycleOwner.lifecycleScope.launch {
+            val url = if (videoId != null) {
+                getStoryboardUrl(videoId, playbackService?.videoAnimatedPreviewURL)
+            } else {
+                getLiveStoryboardUrl(login!!, dvrStream?.createdAt)
+            }
+            // the lowest quality of the VOD being played, for its frames when there is no storyboard
+            val playlist = playbackService?.qualities?.filter { !it.url.isNullOrBlank() && it.name?.startsWith("audio", true) != true }
+                ?.minByOrNull { it.resolution ?: Int.MAX_VALUE }?.url
+            if ((url != null || playlist != null) && view != null) {
+                // a VOD of a stream still live keeps growing
+                preview.load(url, refresh = dvrStream != null || url == null, videoPlaylist = playlist)
+            }
+        }
+    }
+
+    /** TV chat overlay: size, corner and transparency from the chat layout panel, flush with the screen edges by default. */
+    private fun applyTvChatLayout() {
+        with(binding) {
+            val prefs = requireContext().prefs()
+            val metrics = resources.displayMetrics
+            val position = prefs.getInt(C.TV_CHAT_POSITION, 0)
+            val mode = prefs.getInt(C.TV_CHAT_MODE, 0)
+            val margin = if (mode == 0) (prefs.getInt(C.TV_CHAT_MARGIN, 0) * metrics.density).toInt() else 0
+            val screenWidth = root.width.takeIf { it > 0 } ?: metrics.widthPixels
+            val screenHeight = root.height.takeIf { it > 0 } ?: metrics.heightPixels
+            val chatWidth = (screenWidth * prefs.getInt(C.TV_CHAT_WIDTH, 30) / 100f).toInt()
+            val chatHeight = (screenHeight * prefs.getInt(C.TV_CHAT_HEIGHT, 50) / 100f).toInt()
+            // corners 0..3, middle of a side 4..7 (right, left, top, bottom)
+            val left = position == 2 || position == 3 || position == 5
+            val top = position == 1 || position == 3 || position == 6
+            when (mode) {
+                // next to the stream: the picture gets smaller and the chat takes a column
+                1 -> {
+                    playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = screenWidth - chatWidth
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                        gravity = if (left) Gravity.END else Gravity.START
+                        marginEnd = 0
+                    }
+                    chatLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = chatWidth
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                        gravity = if (left) Gravity.START else Gravity.END
+                        setMargins(0, 0, 0, 0)
+                        marginStart = 0
+                        marginEnd = 0
+                    }
+                }
+                // under (or above) the stream: the chat takes a band the whole width of the screen
+                2 -> {
+                    // as many lines of chat as chosen: the height of a line follows the size of the text and of the emotes
+                    val sizeModifier = prefs.getInt(C.CHAT_SIZE_MODIFIER, 100) / 100f
+                    val textHeight = android.util.TypedValue.applyDimension(
+                        android.util.TypedValue.COMPLEX_UNIT_SP, (prefs.getString(C.CHAT_TEXT_SIZE, "14")?.toFloatOrNull() ?: 14f) * sizeModifier, metrics
+                    ) * 1.35f
+                    val emoteHeight = (prefs.getString(C.CHAT_EMOTE_SIZE, "29.5")?.toFloatOrNull() ?: 29.5f) * sizeModifier * metrics.density
+                    val lineHeight = maxOf(textHeight, emoteHeight) + 2 * metrics.density
+                    val lines = prefs.getInt(C.TV_CHAT_LINES, 3)
+                    val bandHeight = (lineHeight * lines + 8 * metrics.density).toInt().coerceAtMost((screenHeight * 0.6f).toInt())
+                    // option: the band over the stream, the picture stays full screen
+                    val overStream = prefs.getBoolean(C.TV_CHAT_BAND_OVERLAY, false)
+                    playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = ViewGroup.LayoutParams.MATCH_PARENT
+                        height = if (overStream) ViewGroup.LayoutParams.MATCH_PARENT else screenHeight - bandHeight
+                        gravity = if (overStream) Gravity.NO_GRAVITY else if (top) Gravity.BOTTOM else Gravity.TOP
+                        marginEnd = 0
+                    }
+                    chatLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = ViewGroup.LayoutParams.MATCH_PARENT
+                        height = bandHeight
+                        gravity = if (top) Gravity.TOP else Gravity.BOTTOM
+                        setMargins(0, 0, 0, 0)
+                        marginStart = 0
+                        marginEnd = 0
+                    }
+                }
+                else -> {
+                    playerLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = ViewGroup.LayoutParams.MATCH_PARENT
+                        height = ViewGroup.LayoutParams.MATCH_PARENT
+                        gravity = Gravity.NO_GRAVITY
+                        marginEnd = 0
+                    }
+                    chatLayout.updateLayoutParams<FrameLayout.LayoutParams> {
+                        width = chatWidth
+                        height = chatHeight
+                        gravity = when (position) {
+                            1 -> Gravity.END or Gravity.TOP
+                            2 -> Gravity.START or Gravity.BOTTOM
+                            3 -> Gravity.START or Gravity.TOP
+                            4 -> Gravity.END or Gravity.CENTER_VERTICAL
+                            5 -> Gravity.START or Gravity.CENTER_VERTICAL
+                            6 -> Gravity.CENTER_HORIZONTAL or Gravity.TOP
+                            7 -> Gravity.CENTER_HORIZONTAL or Gravity.BOTTOM
+                            else -> Gravity.END or Gravity.BOTTOM
+                        }
+                        marginStart = margin
+                        marginEnd = margin
+                        topMargin = margin
+                        bottomMargin = margin
+                    }
+                }
+            }
+            chatFragment?.setSingleLine(mode == 2 && prefs.getInt(C.TV_CHAT_LINES, 3) == 1)
+            chatLayout.translationY = if (playerControls.root.isVisible) getTvChatLift() else 0f
+            // both backgrounds are opaque: the opacity chosen is the only one applied (the rounded one was already see-through,
+            // 100 % gave 55 % as soon as the chat left the edges)
+            chatLayout.setBackgroundResource(if (margin == 0) R.drawable.tv_chat_overlay_flush else R.drawable.tv_chat_overlay_rounded)
+            chatLayout.background?.mutate()?.alpha = (prefs.getInt(C.TV_CHAT_OPACITY, 55) * 255 / 100).coerceIn(0, 255)
+            chatLayout.clipToOutline = margin != 0
+        }
+    }
+
+    /** The chat goes up over the controls only when it is at the bottom of the screen. */
+    private fun getTvChatLift(): Float {
+        val position = requireContext().prefs().getInt(C.TV_CHAT_POSITION, 0)
+        val mode = requireContext().prefs().getInt(C.TV_CHAT_MODE, 0)
+        // the band at the bottom over the stream: it goes up over the controls while they are shown
+        if (mode == 2 && requireContext().prefs().getBoolean(C.TV_CHAT_BAND_OVERLAY, false)) {
+            val top = position == 1 || position == 3 || position == 6
+            return if (top) 0f else -resources.getDimension(R.dimen.tv_chat_lift)
+        }
+        // next to or under the stream, the controls are on the picture and the chat stays where it is
+        if (mode != 0) {
+            return 0f
+        }
+        return if (position == 0 || position == 2 || position == 7) -resources.getDimension(R.dimen.tv_chat_lift) else 0f
+    }
+
+    /**
+     * Panel with sliders to place the chat, on the opposite side so the chat can be seen while it changes.
+     * Its rows follow the display: corners over the stream, sides next to it, above or under it.
+     */
+    private fun showChatLayoutPanel() {
+        val context = requireContext()
+        val prefs = context.prefs()
+        if (!binding.chatLayout.isVisible) {
+            showChat()
+        }
+        val corners = listOf(
+            getString(R.string.tv_chat_bottom_right),
+            getString(R.string.tv_chat_top_right),
+            getString(R.string.tv_chat_bottom_left),
+            getString(R.string.tv_chat_top_left),
+            getString(R.string.tv_chat_middle_right),
+            getString(R.string.tv_chat_middle_left),
+            getString(R.string.tv_chat_middle_top),
+            getString(R.string.tv_chat_middle_bottom),
+        )
+        val sides = listOf(getString(R.string.tv_chat_right), getString(R.string.tv_chat_left))
+        val bands = listOf(getString(R.string.tv_chat_under), getString(R.string.tv_chat_above))
+        val modes = listOf(
+            getString(R.string.tv_chat_mode_overlay),
+            getString(R.string.tv_chat_mode_side),
+            getString(R.string.tv_chat_mode_below),
+        )
+        com.github.andreyasadchy.xtra.ui.tv.TvDialogs.show(context) { dismiss ->
+            val position = androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(prefs.getInt(C.TV_CHAT_POSITION, 0)) }
+            val mode = androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(prefs.getInt(C.TV_CHAT_MODE, 0)) }
+            val left = position.intValue == 2 || position.intValue == 3 || position.intValue == 5
+            com.github.andreyasadchy.xtra.ui.tv.SidePanel(
+                title = getString(R.string.tv_chat_layout),
+                scrollable = true,
+                alignEnd = left && mode.intValue != 2,
+            ) {
+                val requester = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+                val update: (String, Int) -> Unit = { key, value ->
+                    prefs.edit { putInt(key, value) }
+                    if (_binding != null) {
+                        applyTvChatLayout()
+                    }
+                }
+                com.github.andreyasadchy.xtra.ui.tv.SelectorRow(getString(R.string.tv_chat_mode), modes, mode.intValue, androidx.compose.ui.Modifier.focusRequester(requester)) {
+                    mode.intValue = it
+                    update(C.TV_CHAT_MODE, it)
+                }
+                androidx.compose.runtime.key(mode.intValue) {
+                    when (mode.intValue) {
+                        1 -> {
+                            com.github.andreyasadchy.xtra.ui.tv.SelectorRow(getString(R.string.tv_chat_position), sides, if (left) 1 else 0) {
+                                position.intValue = if (it == 1) 2 else 0
+                                update(C.TV_CHAT_POSITION, position.intValue)
+                            }
+                            textSizeRow(prefs)
+                            com.github.andreyasadchy.xtra.ui.tv.SliderRow(getString(R.string.tv_chat_width), prefs.getInt(C.TV_CHAT_WIDTH, 30), 5..60, valueText = { "$it %" }) {
+                                update(C.TV_CHAT_WIDTH, it)
+                            }
+                        }
+                        2 -> {
+                            val top = position.intValue == 1 || position.intValue == 3 || position.intValue == 6
+                            com.github.andreyasadchy.xtra.ui.tv.SelectorRow(getString(R.string.tv_chat_position), bands, if (top) 1 else 0) {
+                                position.intValue = if (it == 1) 1 else 0
+                                update(C.TV_CHAT_POSITION, position.intValue)
+                            }
+                            // the band apart (the picture a bit smaller) or over the stream (the picture full screen)
+                            com.github.andreyasadchy.xtra.ui.tv.SelectorRow(
+                                getString(R.string.tv_chat_band),
+                                listOf(getString(R.string.tv_chat_band_separate), getString(R.string.tv_chat_band_overlay)),
+                                if (prefs.getBoolean(C.TV_CHAT_BAND_OVERLAY, false)) 1 else 0,
+                            ) {
+                                prefs.edit { putBoolean(C.TV_CHAT_BAND_OVERLAY, it == 1) }
+                                if (_binding != null) {
+                                    applyTvChatLayout()
+                                }
+                            }
+                            textSizeRow(prefs)
+                            com.github.andreyasadchy.xtra.ui.tv.SliderRow(
+                                getString(R.string.tv_chat_height),
+                                prefs.getInt(C.TV_CHAT_LINES, 3),
+                                1..12,
+                                valueText = { if (it == 1) getString(R.string.tv_chat_one_line) else getString(R.string.tv_chat_lines, it) }
+                            ) {
+                                update(C.TV_CHAT_LINES, it)
+                            }
+                        }
+                        else -> {
+                            com.github.andreyasadchy.xtra.ui.tv.SelectorRow(getString(R.string.tv_chat_position), corners, position.intValue) {
+                                position.intValue = it
+                                update(C.TV_CHAT_POSITION, it)
+                            }
+                            textSizeRow(prefs)
+                            com.github.andreyasadchy.xtra.ui.tv.SliderRow(getString(R.string.tv_chat_width), prefs.getInt(C.TV_CHAT_WIDTH, 30), 5..60, valueText = { "$it %" }) {
+                                update(C.TV_CHAT_WIDTH, it)
+                            }
+                            com.github.andreyasadchy.xtra.ui.tv.SliderRow(getString(R.string.tv_chat_height), prefs.getInt(C.TV_CHAT_HEIGHT, 50), 20..100, step = 5, valueText = { "$it %" }) {
+                                update(C.TV_CHAT_HEIGHT, it)
+                            }
+                            com.github.andreyasadchy.xtra.ui.tv.SliderRow(getString(R.string.tv_chat_margin), prefs.getInt(C.TV_CHAT_MARGIN, 0), 0..64, step = 4, valueText = { "$it dp" }) {
+                                update(C.TV_CHAT_MARGIN, it)
+                            }
+                        }
+                    }
+                }
+                com.github.andreyasadchy.xtra.ui.tv.SliderRow(getString(R.string.tv_chat_opacity), prefs.getInt(C.TV_CHAT_OPACITY, 55), 0..100, step = 5, valueText = { "$it %" }) {
+                    update(C.TV_CHAT_OPACITY, it)
+                }
+                // delay of the live chat: off, auto (the latency of the stream) or 1 to 60 s
+                val delayMode = androidx.compose.runtime.remember { androidx.compose.runtime.mutableIntStateOf(prefs.getString(C.CHAT_DELAY_MODE, "1")?.toIntOrNull()?.coerceIn(0, 2) ?: 1) }
+                com.github.andreyasadchy.xtra.ui.tv.SelectorRow(
+                    getString(R.string.tv_chat_delay),
+                    listOf(getString(R.string.tv_chat_delay_off), getString(R.string.tv_chat_delay_auto), getString(R.string.tv_chat_delay_manual)),
+                    delayMode.intValue,
+                ) {
+                    delayMode.intValue = it
+                    prefs.edit { putString(C.CHAT_DELAY_MODE, it.toString()) }
+                }
+                androidx.compose.runtime.key(delayMode.intValue) {
+                    when (delayMode.intValue) {
+                        1 -> {
+                            val measured by androidx.compose.runtime.produceState(chatFragment?.getAutoDelayMs() ?: 0L) {
+                                while (true) {
+                                    value = chatFragment?.getAutoDelayMs() ?: 0L
+                                    kotlinx.coroutines.delay(1000)
+                                }
+                            }
+                            val now = if (measured > 0L) {
+                                getString(R.string.tv_chat_delay_auto_now, "%.1f".format(measured / 1000f))
+                            } else {
+                                getString(R.string.tv_chat_delay_auto_measuring)
+                            }
+                            androidx.tv.material3.Text(
+                                getString(R.string.tv_chat_delay_auto_info) + "\n" + now,
+                                fontSize = 13.sp,
+                                lineHeight = 18.sp,
+                                color = com.github.andreyasadchy.xtra.ui.tv.TvColors.secondaryText,
+                                modifier = androidx.compose.ui.Modifier.padding(start = 18.dp, end = 18.dp, top = 2.dp, bottom = 6.dp),
+                            )
+                        }
+                        2 -> {
+                            com.github.andreyasadchy.xtra.ui.tv.SliderRow(getString(R.string.tv_chat_delay_seconds), prefs.getInt(C.CHAT_DELAY_SECONDS, 5).coerceIn(1, 60), 1..60, valueText = { "$it s" }) {
+                                prefs.edit { putInt(C.CHAT_DELAY_SECONDS, it) }
+                            }
+                        }
+                    }
+                }
+                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(12.dp))
+                com.github.andreyasadchy.xtra.ui.tv.ButtonRow(getString(R.string.tv_reset)) {
+                    prefs.edit {
+                        remove(C.TV_CHAT_POSITION)
+                        remove(C.TV_CHAT_WIDTH)
+                        remove(C.TV_CHAT_HEIGHT)
+                        remove(C.TV_CHAT_MARGIN)
+                        remove(C.TV_CHAT_OPACITY)
+                        remove(C.TV_CHAT_MODE)
+                        remove(C.TV_CHAT_LINES)
+                        remove(C.CHAT_SIZE_MODIFIER)
+                        remove(C.CHAT_DELAY_MODE)
+                        remove(C.TV_CHAT_BAND_OVERLAY)
+                        remove(C.CHAT_DELAY_SECONDS)
+                    }
+                    chatFragment?.applySizeModifier()
+                    if (_binding != null) {
+                        applyTvChatLayout()
+                    }
+                    dismiss()
+                }
+                androidx.compose.runtime.LaunchedEffect(Unit) { requester.requestFocus() }
+            }
+        }
+    }
+
+    /**
+     * TV: a switch of stream starts: a copy of the picture on the screen is taken (in the background, the switch does not
+     * wait for it), the next player screen shows it until the picture of the next stream is there.
+     */
+    fun captureSwitchFrame() {
+        if (!isTv || !isMaximized) {
+            return
+        }
+        // the stream left was still loading: its loading picture is what is on the screen
+        ((loadingPicture?.drawable as? android.graphics.drawable.BitmapDrawable)?.bitmap)?.let {
+            putSwitchFrame(it)
+            return
+        }
+        val surface = _binding?.playerSurface ?: return
+        if (!surface.holder.surface.isValid || surface.width <= 0 || surface.height <= 0) {
+            return
+        }
+        val width = 640
+        val height = (640f * surface.height / surface.width).toInt().coerceAtLeast(1)
+        val bitmap = try {
+            android.graphics.Bitmap.createBitmap(width, height, android.graphics.Bitmap.Config.ARGB_8888)
+        } catch (e: Throwable) {
+            return
+        }
+        try {
+            android.view.PixelCopy.request(surface, bitmap, { result ->
+                if (result == android.view.PixelCopy.SUCCESS) {
+                    putSwitchFrame(bitmap)
+                }
+            }, android.os.Handler(android.os.Looper.getMainLooper()))
+        } catch (e: Exception) {
+            // the surface went away meanwhile: no copy, the loading picture of the next stream as before
+        }
+    }
+
+    /** TV: the stream and its chat as dark as the dimming says, the icon of its button shows if it is on. */
+    private val tvDimListener: () -> Unit = { applyTvDim() }
+
+    private fun applyTvDim() {
+        val binding = _binding ?: return
+        if (!isTv) {
+            return
+        }
+        com.github.andreyasadchy.xtra.ui.tv.TvDim.apply(binding.aspectRatioFrameLayout)
+        com.github.andreyasadchy.xtra.ui.tv.TvDim.apply(binding.chatLayout)
+        binding.playerControls.tvDim?.setImageResource(
+            if (com.github.andreyasadchy.xtra.ui.tv.TvDim.active) R.drawable.tv_ic_dim_on else R.drawable.tv_ic_dim
+        )
+    }
+
+    /** TV: the icon of the proxy button says if the custom proxy is on. */
+    private fun updateTvProxyIcon() {
+        val on = requireContext().prefs().getBoolean(C.PLAYER_USE_CUSTOM_PROXY, true)
+        _binding?.playerControls?.tvProxy?.setImageResource(if (on) R.drawable.tv_ic_proxy_on else R.drawable.tv_ic_proxy)
+    }
+
+    /** TV: the list of the custom proxies (OK held on the proxy button), saved in the settings when it closes. */
+    private fun showTvProxyPanel() {
+        val activity = activity as? MainActivity ?: return
+        val repository = (activity.application as com.github.andreyasadchy.xtra.XtraApp).xtraModule.playerRepository
+        viewLifecycleOwner.lifecycleScope.launch {
+            val proxies = repository.getCustomProxies()
+            if (_binding == null) {
+                return@launch
+            }
+            com.github.andreyasadchy.xtra.ui.tv.TvProxyPanel.show(
+                activity,
+                proxies,
+                openSettings = { activity.openCustomProxySettings() },
+            ) { changed ->
+                if (changed != null) {
+                    activity.lifecycleScope.launch {
+                        repository.updateCustomProxies(changed)
+                        // the stream plays through the proxies: it starts again with the new list
+                        if (activity.prefs().getBoolean(C.PLAYER_USE_CUSTOM_PROXY, true)) {
+                            activity.restartCurrentStream()
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /** TV: level of the dimming (OK held on its button), the stream gets darker while it changes. */
+    private fun showTvDimPanel() {
+        val context = requireContext()
+        // set while choosing it: seen at once
+        com.github.andreyasadchy.xtra.ui.tv.TvDim.setActive(true)
+        com.github.andreyasadchy.xtra.ui.tv.TvDialogs.show(context) { dismiss ->
+            com.github.andreyasadchy.xtra.ui.tv.SidePanel(title = getString(R.string.tv_dim), scrollable = true) {
+                val requester = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+                com.github.andreyasadchy.xtra.ui.tv.SliderRow(
+                    getString(R.string.tv_dim_level),
+                    com.github.andreyasadchy.xtra.ui.tv.TvDim.level(context),
+                    10..90,
+                    step = 10,
+                    valueText = { "$it %" },
+                    modifier = androidx.compose.ui.Modifier.focusRequester(requester),
+                ) {
+                    com.github.andreyasadchy.xtra.ui.tv.TvDim.setLevel(context, it)
+                }
+                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(12.dp))
+                com.github.andreyasadchy.xtra.ui.tv.ButtonRow(getString(R.string.tv_dim_off)) {
+                    com.github.andreyasadchy.xtra.ui.tv.TvDim.setActive(false)
+                    dismiss()
+                }
+                androidx.compose.runtime.LaunchedEffect(Unit) { requester.requestFocus() }
+            }
+        }
+    }
+
+    /** TV: the small window closed: its button goes away, the focus moves to another button of the controls if it was on it. */
+    fun onTvPipClosed() {
+        val button = _binding?.playerControls?.tvPipSettings ?: return
+        val hadFocus = button.hasFocus()
+        button.visibility = View.GONE
+        if (hadFocus && binding.playerControls.root.isVisible) {
+            focusPrimaryControl()
+        }
+    }
+
+    /**
+     * TV: panel of the small window: its corner and its size (it moves at once), the sound (the big stream, the small
+     * window or both, with the balance between them), swap the streams, close it. All of it is kept for the next time.
+     */
+    private fun showTvPipPanel() {
+        val activity = activity as? MainActivity ?: return
+        if (!activity.isTvPipOpen()) {
+            return
+        }
+        val prefs = activity.prefs()
+        val cornerValues = listOf("tl", "tr", "bl", "br")
+        val corners = listOf(
+            getString(R.string.tv_pip_corner_tl),
+            getString(R.string.tv_pip_corner_tr),
+            getString(R.string.tv_pip_corner_bl),
+            getString(R.string.tv_pip_corner_br),
+        )
+        val sizes = listOf(getString(R.string.tv_pip_size_small), getString(R.string.tv_pip_size_medium), getString(R.string.tv_pip_size_large))
+        val soundValues = listOf("main", "pip", "both")
+        val sounds = listOf(getString(R.string.tv_pip_sound_main), getString(R.string.tv_pip_sound_pip), getString(R.string.tv_pip_sound_both))
+        com.github.andreyasadchy.xtra.ui.tv.TvDialogs.show(activity) { dismiss ->
+            val corner = androidx.compose.runtime.remember {
+                androidx.compose.runtime.mutableIntStateOf(cornerValues.indexOf(prefs.getString(C.TV_PIP_CORNER, "tr")).coerceAtLeast(0))
+            }
+            val sound = androidx.compose.runtime.remember {
+                androidx.compose.runtime.mutableIntStateOf(soundValues.indexOf(prefs.getString(C.TV_PIP_SOUND, "main")).coerceAtLeast(0))
+            }
+            // the panel on the other side of the screen, the small window stays in sight
+            val pipOnLeft = corner.intValue == 0 || corner.intValue == 2
+            com.github.andreyasadchy.xtra.ui.tv.SidePanel(
+                title = getString(R.string.tv_pip_settings),
+                alignEnd = pipOnLeft,
+                scrollable = true,
+            ) {
+                val requester = androidx.compose.runtime.remember { androidx.compose.ui.focus.FocusRequester() }
+                com.github.andreyasadchy.xtra.ui.tv.SelectorRow(getString(R.string.tv_pip_position), corners, corner.intValue, androidx.compose.ui.Modifier.focusRequester(requester)) {
+                    corner.intValue = it
+                    prefs.edit { putString(C.TV_PIP_CORNER, cornerValues[it]) }
+                    activity.applyTvPipSettings()
+                }
+                com.github.andreyasadchy.xtra.ui.tv.SelectorRow(getString(R.string.tv_pip_size), sizes, prefs.getInt(C.TV_PIP_SIZE, 1).coerceIn(0, 2)) {
+                    prefs.edit { putInt(C.TV_PIP_SIZE, it) }
+                    activity.applyTvPipSettings()
+                }
+                com.github.andreyasadchy.xtra.ui.tv.SelectorRow(getString(R.string.tv_pip_sound), sounds, sound.intValue) {
+                    sound.intValue = it
+                    prefs.edit { putString(C.TV_PIP_SOUND, soundValues[it]) }
+                    activity.applyTvPipSettings()
+                }
+                // the balance only means something when both streams are heard
+                if (sound.intValue == 2) {
+                    com.github.andreyasadchy.xtra.ui.tv.SliderRow(
+                        getString(R.string.tv_pip_balance),
+                        prefs.getInt(C.TV_PIP_BALANCE, 0).coerceIn(-100, 100),
+                        -100..100,
+                        step = 10,
+                        valueText = { value ->
+                            val main = if (value > 0) 100 - value else 100
+                            val small = if (value < 0) 100 + value else 100
+                            getString(R.string.tv_pip_balance_value, main, small)
+                        }
+                    ) {
+                        prefs.edit { putInt(C.TV_PIP_BALANCE, it) }
+                        activity.applyTvPipSettings()
+                    }
+                }
+                androidx.compose.foundation.layout.Spacer(androidx.compose.ui.Modifier.height(12.dp))
+                com.github.andreyasadchy.xtra.ui.tv.ButtonRow(getString(R.string.tv_pip_swap)) {
+                    dismiss()
+                    activity.swapTvPip()
+                }
+                com.github.andreyasadchy.xtra.ui.tv.ButtonRow(getString(R.string.tv_pip_close)) {
+                    dismiss()
+                    activity.closeTvPip()
+                }
+                androidx.compose.runtime.LaunchedEffect(Unit) { requester.requestFocus() }
+            }
+        }
+    }
+
+    @androidx.compose.runtime.Composable
+    private fun textSizeRow(prefs: android.content.SharedPreferences) {
+        com.github.andreyasadchy.xtra.ui.tv.SliderRow(getString(R.string.tv_chat_text_size), prefs.getInt(C.CHAT_SIZE_MODIFIER, 100), 60..200, step = 10, valueText = { "$it %" }) {
+            prefs.edit { putInt(C.CHAT_SIZE_MODIFIER, it) }
+            chatFragment?.applySizeModifier()
+            // the band under the stream is as high as its lines
+            if (_binding != null) {
+                applyTvChatLayout()
+            }
+        }
+    }
+
+    /** TV: write a chat message, with voice input in the field (no system popup). */
+    private fun showChatComposer() {
+        com.github.andreyasadchy.xtra.ui.tv.TvDialogs.show(requireContext()) { dismiss ->
+            com.github.andreyasadchy.xtra.ui.tv.ChatComposer(
+                title = getString(R.string.tv_write_message),
+                hint = getString(R.string.tv_message_hint),
+                sendLabel = getString(R.string.tv_send),
+            ) { text ->
+                if (text.isNotBlank()) {
+                    chatFragment?.sendExternalMessage(text)
+                }
+                dismiss()
+            }
+        }
+    }
+
+    private var tooltipAnchor: View? = null
+    private val tooltipShowAction = Runnable { showTooltipNow() }
+    private val tvStatsAction = object : Runnable {
+        override fun run() {
+            val stats = tvStatsView ?: return
+            if (view == null || !stats.isVisible) {
+                return
+            }
+            stats.text = getStatsForNerds() ?: ""
+            stats.postDelayed(this, 1000)
+        }
+    }
+
+    /** Label of the quality being played, shown in the TV HUD. */
+    open fun getCurrentQualityLabel(): String? {
+        return playbackService?.quality?.name?.let {
+            when (it) {
+                VideoQuality.AUTO_QUALITY -> getString(R.string.auto)
+                VideoQuality.SOURCE_QUALITY -> getString(R.string.source)
+                VideoQuality.AUDIO_ONLY_QUALITY -> getString(R.string.audio_only)
+                else -> it
+            }
+        }
+    }
+
+    open fun getStatsForNerds(): String? = null
+
+    private fun onTvControllerVisibility(visible: Boolean) {
+        if (!isTv || _binding == null) {
+            return
+        }
+        // the small window in a bottom corner goes up over the controls while they are shown (not for the info only of a
+        // switch: no bar of buttons to make room for)
+        val lift = visible && !hudPeek
+        (activity as? MainActivity)?.onTvControlsVisibility(lift)
+        with(binding) {
+            if (chatLayout.isVisible) {
+                chatLayout.animate().translationY(if (lift) getTvChatLift() else 0f).setDuration(200L).start()
+            }
+            if (visible) {
+                // the button of the small window, only while it is open
+                playerControls.tvPipSettings?.visibility = if ((activity as? MainActivity)?.isTvPipOpen() == true) View.VISIBLE else View.GONE
+                playerControls.tvQualityInfo?.let { info ->
+                    val label = getCurrentQualityLabel()
+                    info.text = label
+                    info.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE
+                }
+            } else {
+                hideTooltip()
+                seekPreview?.hide()
+            }
+        }
+    }
+
+    /** TV HUD: labels and tooltips on the player buttons, stats for nerds. */
+    private fun setupTvHud() {
+        binding.root.removeCallbacks(tvHudTicker)
+        if (isTv || requireContext().prefs().getBoolean(C.PLAYER_FRAME_RATE_MATCHING, false)) {
+            binding.root.post(tvHudTicker)
+        }
+        if (!isTv) {
+            return
+        }
+        binding.root.viewTreeObserver.removeOnGlobalFocusChangeListener(hudFocusListener)
+        binding.root.viewTreeObserver.addOnGlobalFocusChangeListener(hudFocusListener)
+        // loading circle in the color of accent
+        if (com.github.andreyasadchy.xtra.ui.tv.TvAccent.current != null) {
+            (binding.bufferingIndicator as? android.widget.ProgressBar)?.indeterminateTintList = com.github.andreyasadchy.xtra.ui.tv.TvAccent.colorList
+        }
+        // the dimming of the streams, as it is now and when it changes
+        com.github.andreyasadchy.xtra.ui.tv.TvDim.removeListener(tvDimListener)
+        com.github.andreyasadchy.xtra.ui.tv.TvDim.addListener(tvDimListener)
+        binding.root.post { applyTvDim() }
+        with(binding.playerControls) {
+            // seeking is done on the timeline on TV
+            rewind.visibility = View.GONE
+            fastForward.visibility = View.GONE
+            val labels = listOf(
+                playPause to R.string.pause,
+                restart to R.string.tv_reload,
+                seekLive to R.string.tv_go_to_live,
+                vodGames to R.string.games,
+                volume to R.string.volume,
+                audioCompressor to R.string.audio_compressor,
+                audioOnly to R.string.audio_only,
+                quality to R.string.quality,
+                speed to R.string.playback_speed,
+                subtitles to R.string.subtitles,
+                toggleChat to R.string.toggle_chat,
+                toggleChatInput to R.string.toggle_chat_bar,
+                follow to R.string.follow,
+                download to R.string.download,
+                sleepTimer to R.string.sleep_timer,
+                aspectRatio to R.string.tv_aspect_ratio,
+                menu to R.string.settings,
+                minimize to R.string.minimize,
+            )
+            val buttons = labels.map { (button, label) ->
+                if (button.contentDescription.isNullOrBlank()) {
+                    button.contentDescription = getString(label)
+                }
+                button
+            } + listOfNotNull(streamList, statsForNerds, chatMessage, multiStream, tvDim, tvProxy, tvPipSettings, chatLayoutSettings)
+            buttons.forEach { button ->
+                button.setOnFocusChangeListener { v, hasFocus ->
+                    if (hasFocus) {
+                        tooltipAnchor = v
+                        tvTooltip?.removeCallbacks(tooltipShowAction)
+                        tvTooltip?.visibility = View.INVISIBLE
+                        tvTooltip?.postDelayed(tooltipShowAction, 600L)
+                    } else if (tooltipAnchor == v) {
+                        hideTooltip()
+                    }
+                }
+            }
+            // the TV buttons can be hidden in the settings (player buttons)
+            val prefs = requireContext().prefs()
+            statsForNerds?.visibility = if (prefs.getBoolean(C.TV_BUTTON_STATS, true)) View.VISIBLE else View.GONE
+            statsForNerds?.setOnClickListener {
+                showController(force = true)
+                toggleStatsForNerds()
+            }
+            if (!prefs.getBoolean(C.CHAT_DISABLE, false) && playbackService?.type != BasePlaybackService.OFFLINE_VIDEO && prefs.getBoolean(C.TV_BUTTON_CHAT_LAYOUT, true)) {
+                chatLayoutSettings?.visibility = View.VISIBLE
+                chatLayoutSettings?.setOnClickListener {
+                    hideController()
+                    showChatLayoutPanel()
+                }
+            }
+            if (TvLitePolicy.PARALLEL_VIDEO && playbackService?.type == BasePlaybackService.STREAM && prefs.getBoolean(C.TV_BUTTON_MULTI_STREAM, true)) {
+                multiStream?.visibility = View.VISIBLE
+                multiStream?.setOnClickListener {
+                    hideController()
+                    (activity as? MainActivity)?.let { activity ->
+                        TvMultiStreamPicker.show(activity, Stream(
+                            id = playbackService?.streamId,
+                            channelId = playbackService?.channelId,
+                            channelLogin = playbackService?.channelLogin,
+                            channelName = playbackService?.channelName,
+                            gameName = playbackService?.gameName,
+                            title = playbackService?.title,
+                        ))
+                    }
+                }
+            }
+            // dimming of the stream: OK turns it on / off, OK held opens its level
+            tvDim?.let { button ->
+                button.visibility = if (prefs.getBoolean(C.TV_BUTTON_DIM, true)) View.VISIBLE else View.GONE
+                button.setOnClickListener {
+                    showController(force = true)
+                    com.github.andreyasadchy.xtra.ui.tv.TvDim.setActive(!com.github.andreyasadchy.xtra.ui.tv.TvDim.active)
+                }
+                button.setOnLongClickListener {
+                    hideController()
+                    showTvDimPanel()
+                    true
+                }
+            }
+            // custom proxy: OK turns it on / off (the stream starts again with it), OK held opens the list of the proxies.
+            // Hidden at first (player buttons), and only there when a proxy is turned on in the list
+            tvProxy?.let { button ->
+                button.visibility = View.GONE
+                if (playbackService?.type == BasePlaybackService.STREAM && prefs.getBoolean(C.TV_BUTTON_PROXY, false)) {
+                    val repository = (requireActivity().application as com.github.andreyasadchy.xtra.XtraApp).xtraModule.playerRepository
+                    viewLifecycleOwner.lifecycleScope.launch {
+                        val any = repository.getCustomProxies().any { it.enabled && !it.url.isNullOrBlank() }
+                        if (_binding != null) {
+                            button.visibility = if (any) View.VISIBLE else View.GONE
+                            updateTvProxyIcon()
+                        }
+                    }
+                }
+                button.setOnClickListener {
+                    val on = !requireContext().prefs().getBoolean(C.PLAYER_USE_CUSTOM_PROXY, true)
+                    requireContext().prefs().edit { putBoolean(C.PLAYER_USE_CUSTOM_PROXY, on) }
+                    updateTvProxyIcon()
+                    android.widget.Toast.makeText(requireContext(), if (on) R.string.tv_proxy_on else R.string.tv_proxy_off, android.widget.Toast.LENGTH_SHORT).show()
+                    (activity as? MainActivity)?.restartCurrentStream()
+                }
+                button.setOnLongClickListener {
+                    hideController()
+                    showTvProxyPanel()
+                    true
+                }
+            }
+            // the small window: its button is there while it is open (see onTvControllerVisibility)
+            tvPipSettings?.setOnClickListener {
+                hideController()
+                showTvPipPanel()
+            }
+            val isLoggedIn = !TwitchApiHelper.getGQLHeaders(requireContext(), true)[C.HEADER_TOKEN].isNullOrBlank() ||
+                    !TwitchApiHelper.getHelixHeaders(requireContext())[C.HEADER_TOKEN].isNullOrBlank()
+            if (playbackService?.type == BasePlaybackService.STREAM && isLoggedIn && !prefs.getBoolean(C.CHAT_DISABLE, false) && prefs.getBoolean(C.TV_BUTTON_CHAT_MESSAGE, true)) {
+                chatMessage?.visibility = View.VISIBLE
+                chatMessage?.setOnClickListener {
+                    hideController()
+                    showChatComposer()
+                }
+            }
+            // the time of day at the top right, it can be turned off in the Xtra TV settings
+            tvClock?.visibility = if (prefs.getBoolean(C.TV_PLAYER_CLOCK, true)) View.VISIBLE else View.GONE
+            // "position / duration": the slash only when both are shown
+            tvTimeSeparator?.let { separator ->
+                val updateSeparator = {
+                    separator.visibility = if (position.isVisible && duration.isVisible) View.VISIBLE else View.GONE
+                }
+                updateSeparator()
+                duration.viewTreeObserver.addOnGlobalLayoutListener { updateSeparator() }
+            }
+            // Nuvio style: the focused button is a white disc, its icon takes the color of accent (ambiance color)
+            val focusedIcon = com.github.andreyasadchy.xtra.ui.tv.TvAccent.onLight
+            buttons.forEach { button ->
+                val previous = button.onFocusChangeListener
+                button.setOnFocusChangeListener { v, hasFocus ->
+                    previous?.onFocusChange(v, hasFocus)
+                    when (v) {
+                        is android.widget.ImageView -> v.setColorFilter(
+                            when {
+                                hasFocus -> focusedIcon
+                                v.isEnabled -> Color.WHITE
+                                else -> Color.GRAY
+                            }
+                        )
+                        is android.widget.Button -> {
+                            v.foregroundTintList = android.content.res.ColorStateList.valueOf(if (hasFocus) focusedIcon else Color.WHITE)
+                            v.setTextColor(if (hasFocus) focusedIcon else Color.WHITE)
+                        }
+                    }
+                }
+            }
+            updateTvAvatars()
+        }
+    }
+
+    /** TV: picture of the channel next to its name, box art of the category next to it. */
+    private fun updateTvAvatars() {
+        if (!isTv || _binding == null) {
+            return
+        }
+        with(binding.playerControls) {
+            val context = requireContext()
+            tvChannelAvatar?.let { avatar ->
+                val image = playbackService?.channelImage
+                if (!image.isNullOrBlank() && channel.isVisible) {
+                    avatar.visibility = View.VISIBLE
+                    context.imageLoader.enqueue(
+                        coil3.request.ImageRequest.Builder(context).apply {
+                            data(image)
+                            transformations(coil3.transform.CircleCropTransformation())
+                            target(avatar)
+                        }.build()
+                    )
+                } else {
+                    avatar.visibility = View.GONE
+                }
+            }
+            val gameId = playbackService?.gameId
+            tvCategoryAvatar?.let { avatar ->
+                if (!gameId.isNullOrBlank() && category.isVisible) {
+                    avatar.visibility = View.VISIBLE
+                    context.imageLoader.enqueue(
+                        coil3.request.ImageRequest.Builder(context).apply {
+                            data("https://static-cdn.jtvnw.net/ttv-boxart/$gameId-52x72.jpg")
+                            transformations(coil3.transform.RoundedCornersTransformation(6f))
+                            target(avatar)
+                        }.build()
+                    )
+                } else {
+                    avatar.visibility = View.GONE
+                }
+            }
+            tvCategorySeparator?.visibility = if (channel.isVisible && category.isVisible) View.VISIBLE else View.GONE
+        }
+    }
+
+    private fun showTooltipNow() {
+        val tooltip = _binding?.playerControls?.tvTooltip ?: return
+        val anchor = tooltipAnchor ?: return
+        if (!anchor.hasFocus() || anchor.contentDescription.isNullOrBlank()) {
+            return
+        }
+        val root = binding.playerControls.root
+        tooltip.text = anchor.contentDescription
+        // the name of the button in the color of accent, like its icon
+        tooltip.setTextColor(com.github.andreyasadchy.xtra.ui.tv.TvAccent.onLight)
+        tooltip.measure(View.MeasureSpec.UNSPECIFIED, View.MeasureSpec.UNSPECIFIED)
+        val rootLocation = IntArray(2)
+        val anchorLocation = IntArray(2)
+        root.getLocationInWindow(rootLocation)
+        anchor.getLocationInWindow(anchorLocation)
+        val margin = 8 * resources.displayMetrics.density
+        val x = anchorLocation[0] - rootLocation[0] + anchor.width / 2f - tooltip.measuredWidth / 2f
+        tooltip.translationX = x.coerceIn(margin, (root.width - tooltip.measuredWidth - margin).coerceAtLeast(margin))
+        tooltip.translationY = anchorLocation[1] - rootLocation[1] - tooltip.measuredHeight - margin
+        tooltip.alpha = 0f
+        tooltip.visibility = View.VISIBLE
+        tooltip.animate().alpha(1f).setDuration(150L).start()
+    }
+
+    private fun hideTooltip() {
+        val tooltip = _binding?.playerControls?.tvTooltip ?: return
+        tooltip.removeCallbacks(tooltipShowAction)
+        tooltip.animate().cancel()
+        tooltip.visibility = View.INVISIBLE
+        tooltipAnchor = null
+    }
+
+    private var tvTopRightStack: LinearLayout? = null
+    private var tvAdblockView: TextView? = null
+    private var frameRateModeCandidate = 0
+    private var frameRateModeApplied = 0
+    private var frameRateModeChecks = 0
+
+    /** Every second: ad blocker status, quality badge, frame rate of the display. */
+    private val tvHudTicker = object : Runnable {
+        override fun run() {
+            if (_binding == null || view == null) {
+                return
+            }
+            if (isTv) {
+                // the TV never goes to sleep while a stream plays, whichever player shows it
+                activity?.window?.let { window ->
+                    if (isPlayingOrLoading()) {
+                        window.addFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    } else {
+                        window.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+                    }
+                }
+                updateAdblockBadge()
+                if (binding.playerControls.root.isVisible) {
+                    binding.playerControls.tvQualityInfo?.let { info ->
+                        val label = getCurrentQualityLabel()
+                        if (info.text?.toString() != label) {
+                            info.text = label
+                        }
+                        info.visibility = if (label.isNullOrBlank()) View.GONE else View.VISIBLE
+                    }
+                }
+            }
+            updateFrameRateMatching()
+            binding.root.postDelayed(this, 1000)
+        }
+    }
+
+    /** What the badge of the ad blocker shows, null while it does not work. */
+    open fun getAdblockInfo(): ExoPlayerService.AdblockInfo? = null
+
+    open fun getVideoFrameRate(): Float? = null
+
+    open fun isPlayingOrLoading(): Boolean = false
+
+    /** The picture moves (not loading, not stopped). */
+    open fun isPlayingNow(): Boolean = false
+
+    open fun resumePlayback() {}
+
+    /** Silences the stream while a preview with sound plays over it. */
+    open fun setDucked(ducked: Boolean) {}
+
+    /** True while the ad blocker plays the backup stream: its frame rate is not the one of the stream. */
+    open fun isAdblockSwapping(): Boolean = false
+
+    private fun getTopRightStack(): LinearLayout {
+        return tvTopRightStack ?: LinearLayout(requireContext()).apply {
+            orientation = LinearLayout.VERTICAL
+            gravity = Gravity.END
+            binding.playerLayout.addView(this, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP or Gravity.END).apply {
+                topMargin = resources.getDimensionPixelSize(R.dimen.tv_overscan_vertical)
+                marginEnd = resources.getDimensionPixelSize(R.dimen.tv_overscan_horizontal)
+            })
+            tvTopRightStack = this
+        }
+    }
+
+    /** The box of the ad blocker, with a thin bar at its bottom: how far the ad break is (estimated), when it is known. */
+    private class AdblockBadge(context: android.content.Context) : TextView(context) {
+        private var progress: Float? = null
+        private val density = context.resources.displayMetrics.density
+        private val track = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG).apply { color = 0x33FFFFFF }
+        private val bar = android.graphics.Paint(android.graphics.Paint.ANTI_ALIAS_FLAG)
+
+        fun setProgress(value: Float?) {
+            if (value != progress) {
+                progress = value
+                invalidate()
+            }
+        }
+
+        override fun onDraw(canvas: android.graphics.Canvas) {
+            super.onDraw(canvas)
+            val value = progress ?: return
+            val left = paddingLeft.toFloat()
+            val right = (width - paddingRight).toFloat()
+            val bottom = height - 3 * density
+            val top = bottom - 2.5f * density
+            val radius = 1.25f * density
+            canvas.drawRoundRect(left, top, right, bottom, radius, radius, track)
+            bar.color = com.github.andreyasadchy.xtra.ui.tv.TvAccent.color
+            canvas.drawRoundRect(left, top, left + (right - left) * value, bottom, radius, radius, bar)
+        }
+    }
+
+    /** The badge drawn again 4 times a second while its bar and its seconds move. */
+    private val adblockBadgeRefresh = Runnable { if (_binding != null) updateAdblockBadge() }
+
+    /**
+     * Small box at the top right while the ad blocker works, on two lines like the proxyivshook userscript: the shield,
+     * "Mid-roll ad 2/3 · 12 s", the source of the stream without the ad under it, smaller, and the bar of the ad.
+     */
+    private fun updateAdblockBadge() {
+        val info = getAdblockInfo()
+        val badge = tvAdblockView ?: if (info == null) return else AdblockBadge(requireContext()).apply {
+            setBackgroundResource(R.drawable.tv_chat_overlay_background)
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 13f
+            val density = resources.displayMetrics.density
+            // room under the text for the bar
+            setPadding((12 * density).toInt(), (6 * density).toInt(), (12 * density).toInt(), (10 * density).toInt())
+            getTopRightStack().addView(this, 0, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply {
+                bottomMargin = (8 * density).toInt()
+            })
+            tvAdblockView = this
+        }
+        badge.removeCallbacks(adblockBadgeRefresh)
+        if (info != null) {
+            val text = android.text.SpannableStringBuilder()
+            com.github.andreyasadchy.xtra.util.chat.TvChatNotices.appendIcon(requireContext(), text, R.drawable.tv_ic_shield, com.github.andreyasadchy.xtra.ui.tv.TvAccent.color, badge.textSize * 1.1f)
+            val titleStart = text.length
+            text.append(info.title)
+            text.setSpan(android.text.style.StyleSpan(android.graphics.Typeface.BOLD), titleStart, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            if (!info.source.isNullOrBlank()) {
+                text.append("\n")
+                val sourceStart = text.length
+                text.append(info.source)
+                text.setSpan(android.text.style.RelativeSizeSpan(0.85f), sourceStart, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+                text.setSpan(android.text.style.ForegroundColorSpan(0xB3FFFFFF.toInt()), sourceStart, text.length, android.text.Spanned.SPAN_EXCLUSIVE_EXCLUSIVE)
+            }
+            if (badge.text?.toString() != text.toString()) {
+                badge.text = text
+            }
+            (badge as? AdblockBadge)?.setProgress(info.progress)
+            badge.visibility = View.VISIBLE
+            if (info.progress != null) {
+                badge.postDelayed(adblockBadgeRefresh, 250L)
+            }
+        } else {
+            badge.visibility = View.GONE
+        }
+    }
+
+    /**
+     * Frame rate matching: switches the display to a refresh rate that is a multiple of the frame rate of the stream,
+     * and keeps checking it while playing (the backup player of the ad blocker can have another frame rate).
+     */
+    private fun updateFrameRateMatching() {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+            return
+        }
+        val activity = activity ?: return
+        if (!requireContext().prefs().getBoolean(C.PLAYER_FRAME_RATE_MATCHING, false)) {
+            resetFrameRateMatching()
+            return
+        }
+        // no switch while the ad blocker plays the backup stream, the display waits for the main stream to come back
+        if (isAdblockSwapping()) {
+            frameRateModeCandidate = 0
+            return
+        }
+        val frameRate = getVideoFrameRate() ?: return
+        @Suppress("DEPRECATION")
+        val display = (if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) activity.display else activity.windowManager.defaultDisplay) ?: return
+        val current = display.mode
+        val best = display.supportedModes.filter {
+            it.physicalWidth == current.physicalWidth && it.physicalHeight == current.physicalHeight
+        }.mapNotNull { mode ->
+            val ratio = mode.refreshRate / frameRate
+            val multiple = kotlin.math.round(ratio)
+            val error = kotlin.math.abs(ratio - multiple) / multiple
+            if (multiple >= 1f && error < 0.0015f) Triple(mode, multiple, error) else null
+        }.minWithOrNull(compareBy<Triple<android.view.Display.Mode, Float, Float>> { it.second }.thenBy { it.third })?.first ?: return
+        if (best.modeId == current.modeId && frameRateModeApplied != 0) {
+            frameRateModeCandidate = 0
+            return
+        }
+        // the mode has to be wanted for 3 checks in a row, a short change of the picture does not switch the display
+        if (frameRateModeCandidate != best.modeId) {
+            frameRateModeCandidate = best.modeId
+            frameRateModeChecks = 1
+            return
+        }
+        if (++frameRateModeChecks < 3) {
+            return
+        }
+        frameRateModeCandidate = 0
+        if (frameRateModeApplied != best.modeId) {
+            frameRateModeApplied = best.modeId
+            val wasPlaying = isPlayingOrLoading()
+            activity.window.attributes = activity.window.attributes.also { it.preferredDisplayModeId = best.modeId }
+            // the TV resyncs HDMI: the audio output goes away for a moment and the player pauses, playback goes on by itself
+            for (delay in longArrayOf(1500L, 3500L, 6000L, 9000L)) {
+                binding.root.postDelayed({
+                    if (_binding != null) {
+                        if (wasPlaying) {
+                            resumePlayback()
+                        }
+                        // the window is laid out again: the focus can be lost or go to the lists behind the player
+                        val focused = activity.currentFocus
+                        if (isMaximized && (focused == null || !focused.isShown || !isDescendant(binding.root, focused))) {
+                            requestPlayerFocus()
+                        }
+                    }
+                }, delay)
+            }
+        }
+    }
+
+    private fun isDescendant(parent: View, view: View): Boolean {
+        var current: View? = view
+        while (current != null) {
+            if (current == parent) {
+                return true
+            }
+            current = current.parent as? View
+        }
+        return false
+    }
+
+    private fun resetFrameRateMatching() {
+        if (frameRateModeApplied != 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            frameRateModeApplied = 0
+            frameRateModeCandidate = 0
+            activity?.window?.let { window ->
+                window.attributes = window.attributes.also { it.preferredDisplayModeId = 0 }
+            }
+        }
+    }
+
+    /** Debug builds only: panels of the player for the screenshots of the emulator test. */
+    fun runTvTest(action: String?) {
+        when (action) {
+            "stats" -> {
+                showController(force = true)
+                toggleStatsForNerds()
+            }
+            "chat_layout" -> showChatLayoutPanel()
+            "hud" -> showController(force = true)
+        }
+    }
+
+    private fun toggleStatsForNerds() {
+        val stats = tvStatsView ?: TextView(requireContext()).apply {
+            setBackgroundResource(R.drawable.tv_chat_overlay_background)
+            typeface = android.graphics.Typeface.MONOSPACE
+            setTextColor(android.graphics.Color.WHITE)
+            textSize = 12f
+            val padding = (12 * resources.displayMetrics.density).toInt()
+            setPadding(padding, padding, padding, padding)
+            visibility = View.GONE
+            getTopRightStack().addView(this, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT))
+            tvStatsView = this
+        }
+        if (stats.isVisible) {
+            stats.visibility = View.GONE
+            stats.removeCallbacks(tvStatsAction)
+        } else {
+            stats.visibility = View.VISIBLE
+            stats.removeCallbacks(tvStatsAction)
+            tvStatsAction.run()
+        }
+    }
+
+    /** Focus goes to play/pause, else to the timeline, else to the first button of the bottom row. */
+    /** Last control used in the HUD, the focus goes back to it when the HUD shows again. */
+    private var lastHudControl: java.lang.ref.WeakReference<View>? = null
+    private val hudFocusListener = android.view.ViewTreeObserver.OnGlobalFocusChangeListener { _, newFocus ->
+        val controls = _binding?.playerControls ?: return@OnGlobalFocusChangeListener
+        if (newFocus != null && newFocus != controls.progressBar && (newFocus.parent == controls.bottomLeftLayout || newFocus.parent == controls.bottomRightLayout || newFocus == controls.playPause)) {
+            lastHudControl = java.lang.ref.WeakReference(newFocus)
+            // kept by the app (id, else description), not by this screen: the next player finds it again
+            lastControlId = newFocus.id
+            lastControlLabel = newFocus.contentDescription?.toString()
+        }
+    }
+
+    /** A control with the focus went away: the timeline, else the first control on screen. */
+    protected fun focusAfterHiddenControl() {
+        val controls = _binding?.playerControls ?: return
+        if (isTv && !hudOpenedByUser) {
+            // a button hidden by a switch (the HUD shows only the info): the focus leaves the HUD, not to the timeline
+            binding.dragView.requestFocus()
+            return
+        }
+        if (!(controls.progressBar.isShown && controls.progressBar.requestFocus())) {
+            lastHudControl = null
+            focusPrimaryControl()
+        }
+    }
+
+    private fun focusPrimaryControl() {
+        // the HUD given the focus on purpose (OK, back from an option, end of a stream...): left / right move in it
+        hudOpenedByUser = true
+        with(binding.playerControls) {
+            // the button pressed last, kept from one stream to the next (left / right, other streams)
+            findLastControl()?.let { last ->
+                if (last.isShown && last.isFocusable && last.requestFocus()) {
+                    return
+                }
+            }
+            lastHudControl?.get()?.let { last ->
+                if (last.isShown && last.isFocusable && last.requestFocus()) {
+                    return
+                }
+            }
+            val candidates = mutableListOf<View>(playPause, progressBar)
+            for (layout in listOf(bottomLeftLayout, bottomRightLayout)) {
+                for (i in 0 until layout.childCount) {
+                    candidates.add(layout.getChildAt(i))
+                }
+            }
+            if (candidates.none { it.isShown && it.isFocusable && it.requestFocus() }) {
+                root.requestFocus()
+            }
+        }
+    }
+
+    private var loadingPicture: android.widget.ImageView? = null
+
+    private fun showLoadingPicture() {
+        val picture = pendingLoadingPicture ?: return
+        pendingLoadingPicture = null
+        val context = requireContext()
+        val image = android.widget.ImageView(context).apply {
+            scaleType = android.widget.ImageView.ScaleType.CENTER_CROP
+            setBackgroundColor(android.graphics.Color.BLACK)
+        }
+        // over the video, under the loading circle and the controls
+        val index = binding.playerLayout.indexOfChild(binding.aspectRatioFrameLayout) + 1
+        binding.playerLayout.addView(image, index, android.widget.FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+        loadingPicture = image
+        // a switch of stream: the last picture of the stream left until the picture of this one comes, never a black screen
+        // (put first, the picture of this stream replaces it as soon as it is there)
+        takeSwitchFrame()?.let { image.setImageBitmap(it) } ?: run {
+            switchFrameListener = { frame -> if (loadingPicture === image && image.drawable == null) image.setImageBitmap(frame) }
+        }
+        com.github.andreyasadchy.xtra.ui.tv.TvLoadingPicture.show(image, picture.channelLogin, picture.thumbnail, picture.fallback, viewLifecycleOwner.lifecycleScope) {
+            loadingPicture === image && view != null
+        }
+        // never kept for long: an error or the sound only mode has no first picture
+        image.postDelayed({ hideLoadingPicture() }, 20_000L)
+    }
+
+    /** The first picture of the video is on screen: the picture of the stream fades away. */
+    protected fun hideLoadingPicture() {
+        switchFrameListener = null
+        val image = loadingPicture ?: return
+        loadingPicture = null
+        image.animate().alpha(0f).setDuration(250L).withEndAction { (image.parent as? ViewGroup)?.removeView(image) }.start()
+    }
+
+    /** The button of the controls focused last, in this player or a previous one; null when this one has none like it. */
+    private fun findLastControl(): View? {
+        val controls = _binding?.playerControls ?: return null
+        if (lastControlId != View.NO_ID) {
+            controls.root.findViewById<View>(lastControlId)?.let { return it }
+        }
+        val label = lastControlLabel ?: return null
+        return listOf(controls.bottomLeftLayout, controls.bottomRightLayout).flatMap { layout -> (0 until layout.childCount).map { layout.getChildAt(it) } }
+            .firstOrNull { it.contentDescription?.toString() == label }
+    }
+
+    /** Called by the activity for every key event, keeps the controls visible while they are used with a D-pad. */
+    fun onKeyEventDispatched(event: KeyEvent) {
+        if (_binding != null && isMaximized && event.action == KeyEvent.ACTION_DOWN &&
+            binding.playerControls.root.isVisible && binding.playerControls.root.hasFocus()
+        ) {
+            showController()
+            // OK on a button of the HUD: if it opens a panel, the HUD comes back when that panel closes
+            val isSelect = event.keyCode == KeyEvent.KEYCODE_DPAD_CENTER || event.keyCode == KeyEvent.KEYCODE_ENTER || event.keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+            val focus = activity?.currentFocus
+            if (isTv && isSelect && event.repeatCount == 0 && focus != null &&
+                (focus.parent == binding.playerControls.bottomLeftLayout || focus.parent == binding.playerControls.bottomRightLayout || focus == binding.playerControls.playPause)
+            ) {
+                hudOptionPressedAt = android.os.SystemClock.elapsedRealtime()
+            }
+        }
+    }
+
+    /** TV: OK was pressed on a button of the HUD (time), a panel it opens closing gives the HUD back. */
+    private var hudOptionPressedAt = 0L
+    private var reopenHudAfterOption = false
+
+    /**
+     * TV: the window of the app lost or got back the focus (a panel, a row or a dialog over it opened or closed). A panel
+     * opened from a button of the HUD and closed without changing the stream (a switch makes a new player screen, which
+     * shows the info of its stream): the whole HUD again, the focus on the button that opened it.
+     */
+    fun onTvWindowFocusChanged(hasFocus: Boolean) {
+        if (!isTv || _binding == null) {
+            return
+        }
+        if (!hasFocus) {
+            if (android.os.SystemClock.elapsedRealtime() - hudOptionPressedAt < 2000L) {
+                reopenHudAfterOption = true
+            }
+            return
+        }
+        if (reopenHudAfterOption) {
+            reopenHudAfterOption = false
+            hudOptionPressedAt = 0L
+            binding.root.postDelayed({
+                if (view != null && isAdded && !isRemoving && isMaximized && activity?.hasWindowFocus() == true) {
+                    endHudPeek()
+                    showController(force = true)
+                    binding.playerControls.root.post { if (view != null && !binding.playerControls.root.hasFocus()) focusPrimaryControl() }
+                }
+            }, 200L)
+        }
+    }
+
+    /** Handles D-pad keys while the player itself (and not one of its controls) has focus. */
+    private fun onPlayerKey(keyCode: Int, event: KeyEvent): Boolean {
+        if (BuildConfig.DEBUG) {
+            android.util.Log.d("XtraTv", "playerKey ${KeyEvent.keyCodeToString(keyCode)} action=${event.action} animating=$isAnimating maximized=$isMaximized useController=$useController controlsVisible=${_binding?.playerControls?.root?.isVisible} controllerAnimating=$controllerIsAnimating")
+        }
+        if (_binding == null || isAnimating) {
+            return false
+        }
+        val isSelect = keyCode == KeyEvent.KEYCODE_DPAD_CENTER || keyCode == KeyEvent.KEYCODE_ENTER || keyCode == KeyEvent.KEYCODE_NUMPAD_ENTER
+        if (!isMaximized) {
+            if (isSelect) {
+                if (event.action == KeyEvent.ACTION_UP) {
+                    maximize()
+                }
+                return true
+            }
+            return false
+        }
+        if (!useController) {
+            return false
+        }
+        return when (keyCode) {
+            KeyEvent.KEYCODE_DPAD_LEFT, KeyEvent.KEYCODE_DPAD_RIGHT -> {
+                val queueSize = (activity as? MainActivity)?.streamQueue?.size ?: 0
+                if (dpadSwitchesStreams()) {
+                    // option: HUD hidden, left / right go to the previous / next streamer of the list the stream comes from,
+                    // the timeline is only used once the D-pad is on it (the HUD opened with OK or down has the focus; the info
+                    // of a switch going away does not, left / right still change the streamer then)
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        if (queueSize > 1) {
+                            // a HUD the user did not open never keeps the focus nor its buttons: the next presses switch too
+                            if (binding.playerControls.root.hasFocus()) {
+                                binding.dragView.requestFocus()
+                            }
+                            (activity as? MainActivity)?.switchStream(if (keyCode == KeyEvent.KEYCODE_DPAD_RIGHT) 1 else -1)
+                        } else {
+                            hudOpenedByUser = true
+                            showController(force = true)
+                            binding.playerControls.root.post { if (view != null) focusPrimaryControl() }
+                        }
+                    }
+                    return true
+                }
+                if (binding.playerControls.progressBar.isVisible) {
+                    // seek with the timeline: the following key events go to the focused time bar
+                    if (event.action == KeyEvent.ACTION_DOWN) {
+                        hudOpenedByUser = true
+                        showController(force = true)
+                        binding.playerControls.progressBar.requestFocus()
+                    }
+                    onTimeBarKey(keyCode, event)
+                } else {
+                    false
+                }
+            }
+            KeyEvent.KEYCODE_DPAD_UP, KeyEvent.KEYCODE_DPAD_DOWN, KeyEvent.KEYCODE_DPAD_CENTER, KeyEvent.KEYCODE_ENTER, KeyEvent.KEYCODE_NUMPAD_ENTER -> {
+                if (!isSelect && isTv && isStreamScreen() && (!binding.playerControls.root.isVisible || hudPeek) &&
+                    requireContext().prefs().getBoolean(C.TV_DPAD_UP_DOWN, false)
+                ) {
+                    if (hudPeek) {
+                        endHudPeek()
+                        hideController()
+                    }
+                    // option: HUD hidden, up shows the other streams, down shows or hides the chat
+                    if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                        if (keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+                            (activity as? MainActivity)?.showStreamSwitcher()
+                        } else if (!requireContext().prefs().getBoolean(C.CHAT_DISABLE, false)) {
+                            if (isChatOpen) hideChat() else showChat()
+                        }
+                    }
+                    return true
+                }
+                if (event.action == KeyEvent.ACTION_DOWN && event.repeatCount == 0) {
+                    // the HUD shown after a switch takes the focus now
+                    hudOpenedByUser = true
+                    endHudPeek()
+                    showController(force = true)
+                    binding.playerControls.root.post {
+                        if (view != null && isMaximized && binding.playerControls.root.isVisible && !binding.playerControls.root.hasFocus()) {
+                            focusPrimaryControl()
+                        }
+                        if (BuildConfig.DEBUG && view != null) {
+                            android.util.Log.d("XtraTv", "controls visible=${binding.playerControls.root.isVisible} alpha=${binding.playerControls.root.alpha} hasFocus=${binding.playerControls.root.hasFocus()} playPause visible=${binding.playerControls.playPause.isShown} focusable=${binding.playerControls.playPause.isFocusable}")
+                        }
+                    }
+                }
+                true
+            }
+            else -> false
+        }
+    }
+
+    protected fun showController(show: Boolean = true, force: Boolean = false) {
+        if (show && isTv && !hudPeek) {
+            // the whole HUD again (after the info only of a switch)
+            setHudInfoOnly(false)
+        }
+        if (show) {
+            onTvControllerVisibility(true)
+        }
+        if (!controllerIsAnimating) {
+            if (!binding.playerControls.root.isVisible) {
+                binding.playerControls.root.removeCallbacks(controllerHideAction)
+                if (show) {
+                    controllerAnimation = binding.playerControls.root.animate().apply {
+                        alpha(1f)
+                        setDuration(250L)
+                        setListener(
+                            object : AnimatorListenerAdapter() {
+                                override fun onAnimationStart(animation: Animator) {
+                                    controllerIsAnimating = true
+                                    if (view != null) {
+                                        binding.playerControls.root.visibility = View.VISIBLE
+                                    }
+                                }
+
+                                override fun onAnimationEnd(animation: Animator) {
+                                    controllerIsAnimating = false
+                                    setListener(null)
+                                    if (view != null && controllerAutoHide && controllerHideOnTouch && !binding.playerControls.progressBar.isPressed) {
+                                        binding.playerControls.root.postDelayed(controllerHideAction, controllerHideDelay)
+                                    }
+                                }
+                            }
+                        )
+                        start()
+                    }
+                }
+            } else {
+                binding.playerControls.root.removeCallbacks(controllerHideAction)
+                if (controllerAutoHide && controllerHideOnTouch && !binding.playerControls.progressBar.isPressed) {
+                    binding.playerControls.root.postDelayed(controllerHideAction, controllerHideDelay)
+                }
+            }
+        } else {
+            if (force) {
+                controllerAnimation?.cancel()
+                binding.playerControls.root.removeCallbacks(controllerHideAction)
+                binding.playerControls.root.alpha = 1f
+                binding.playerControls.root.visibility = View.VISIBLE
+                if (controllerAutoHide && controllerHideOnTouch && !binding.playerControls.progressBar.isPressed) {
+                    binding.playerControls.root.postDelayed(controllerHideAction, controllerHideDelay)
+                }
+            }
+        }
+    }
+
+    private fun hideController(force: Boolean = false) {
+        hudOpenedByUser = false
+        endHudPeek()
+        onTvControllerVisibility(false)
+        if (binding.playerControls.root.hasFocus() && (force || !controllerIsAnimating)) {
+            binding.dragView.requestFocus()
+        }
+        if (!controllerIsAnimating && binding.playerControls.root.isVisible) {
+            controllerAnimation = binding.playerControls.root.animate().apply {
+                alpha(0f)
+                setDuration(250L)
+                setListener(
+                    object : AnimatorListenerAdapter() {
+                        override fun onAnimationStart(animation: Animator) {
+                            controllerIsAnimating = true
+                        }
+
+                        override fun onAnimationEnd(animation: Animator) {
+                            controllerIsAnimating = false
+                            setListener(null)
+                            if (view != null) {
+                                binding.playerControls.root.visibility = View.GONE
+                            }
+                        }
+                    }
+                )
+                start()
+            }
+        } else {
+            if (force) {
+                controllerAnimation?.cancel()
+                binding.playerControls.root.alpha = 0f
+                binding.playerControls.root.visibility = View.GONE
+            }
+        }
+    }
+
+    private fun showStatusBar() {
+        WindowCompat.getInsetsController(
+            requireActivity().window,
+            requireActivity().window.decorView
+        ).show(WindowInsetsCompat.Type.systemBars())
+    }
+
+    private fun hideStatusBar() {
+        WindowCompat.getInsetsController(
+            requireActivity().window,
+            requireActivity().window.decorView
+        ).hide(WindowInsetsCompat.Type.systemBars())
+    }
+
+    private fun enableBackground() {
+        backgroundVisible = true
+        binding.playerBackground.setBackgroundColor(
+            if (isPortrait) {
+                backgroundColor ?: MaterialColors.getColor(binding.playerBackground, com.google.android.material.R.attr.colorSurface).also { backgroundColor = it }
+            } else {
+                Color.BLACK
+            }
+        )
+        binding.playerBackground.isClickable = true
+    }
+
+    private fun disableBackground() {
+        backgroundVisible = false
+        binding.playerBackground.setBackgroundColor(Color.TRANSPARENT)
+        binding.playerBackground.isClickable = false
+    }
+
+    private fun getHorizontalInsets(windowInsets: WindowInsetsCompat?): Int {
+        return if (windowInsets != null) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S && requireContext().prefs().getBoolean(C.PLAYER_ROUNDED_CORNER_PADDING, false)) {
+                val rootWindowInsets = requireView().rootWindowInsets
+                val topLeft = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_TOP_LEFT)
+                val topRight = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_TOP_RIGHT)
+                val bottomLeft = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_LEFT)
+                val bottomRight = rootWindowInsets.getRoundedCorner(RoundedCorner.POSITION_BOTTOM_RIGHT)
+                val leftRadius = max(topLeft?.radius ?: 0, bottomLeft?.radius ?: 0)
+                val rightRadius = max(topRight?.radius ?: 0, bottomRight?.radius ?: 0)
+                if (requireContext().prefs().getBoolean(C.UI_DRAW_BEHIND_CUTOUTS, false)) {
+                    leftRadius + rightRadius
+                } else {
+                    val cutoutInsets = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+                    max(cutoutInsets.left, leftRadius) + max(cutoutInsets.right, rightRadius)
+                }
+            } else {
+                if (requireContext().prefs().getBoolean(C.UI_DRAW_BEHIND_CUTOUTS, false)) {
+                    0
+                } else {
+                    val cutoutInsets = windowInsets.getInsets(WindowInsetsCompat.Type.displayCutout())
+                    cutoutInsets.left + cutoutInsets.right
+                }
+            }
+        } else 0
+    }
+
+    private fun getScaleValues(): Pair<Float, Float> {
+        return if (isPortrait) {
+            0.5f to 0.5f
+        } else {
+            0.3f to 0.325f
+        }
+    }
+
+    fun getIsPortrait() = isPortrait
+
+    fun reloadEmotes() = chatFragment?.reloadEmotes()
+
+    fun isActive() = chatFragment?.isActive()
+
+    fun disconnect() = chatFragment?.disconnect()
+
+    fun reconnect() = chatFragment?.reconnect()
+
+    fun secondViewIsHidden() = _binding?.chatLayout?.isVisible != true && isMaximized
+
+    fun canEnterPictureInPicture(): Boolean = false
+
+    protected fun setPipActions(playing: Boolean) {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O &&
+            requireActivity().packageManager.hasSystemFeature(PackageManager.FEATURE_PICTURE_IN_PICTURE) &&
+            requireContext().prefs().getBoolean(C.PLAYER_PICTURE_IN_PICTURE, true)
+        ) {
+            requireActivity().setPictureInPictureParams(
+                PictureInPictureParams.Builder().apply {
+                    setActions(listOf(
+                        RemoteAction(
+                            Icon.createWithResource(requireContext(), R.drawable.baseline_audiotrack_black_24),
+                            getString(R.string.audio_only),
+                            getString(R.string.audio_only),
+                            PendingIntent.getBroadcast(
+                                requireContext(),
+                                REQUEST_CODE_AUDIO_ONLY,
+                                Intent(MainActivity.INTENT_START_AUDIO_ONLY).setPackage(requireContext().packageName),
+                                PendingIntent.FLAG_IMMUTABLE
+                            )
+                        ),
+                        RemoteAction(
+                            Icon.createWithResource(requireContext(), R.drawable.baseline_close_black_36),
+                            getString(R.string.close_player),
+                            getString(R.string.close_player),
+                            PendingIntent.getBroadcast(
+                                requireContext(),
+                                REQUEST_CODE_CLOSE,
+                                Intent(MainActivity.INTENT_CLOSE_PLAYER).setPackage(requireContext().packageName),
+                                PendingIntent.FLAG_IMMUTABLE
+                            )
+                        ),
+                        if (playing) {
+                            RemoteAction(
+                                Icon.createWithResource(requireContext(), R.drawable.baseline_pause_black_48),
+                                getString(R.string.pause),
+                                getString(R.string.pause),
+                                PendingIntent.getBroadcast(
+                                    requireContext(),
+                                    REQUEST_CODE_PLAY_PAUSE,
+                                    Intent(MainActivity.INTENT_PLAY_PAUSE_PLAYER).setPackage(requireContext().packageName),
+                                    PendingIntent.FLAG_IMMUTABLE
+                                )
+                            )
+                        } else {
+                            RemoteAction(
+                                Icon.createWithResource(requireContext(), R.drawable.baseline_play_arrow_black_48),
+                                getString(R.string.resume),
+                                getString(R.string.resume),
+                                PendingIntent.getBroadcast(
+                                    requireContext(),
+                                    REQUEST_CODE_PLAY_PAUSE,
+                                    Intent(MainActivity.INTENT_PLAY_PAUSE_PLAYER).setPackage(requireContext().packageName),
+                                    PendingIntent.FLAG_IMMUTABLE
+                                )
+                            )
+                        }
+                    ))
+                }.build()
+            )
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        val isInPIPMode = when {
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> requireActivity().isInPictureInPictureMode
+            Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> !useController && isMaximized
+            else -> false
+        }
+        if (isInPIPMode) {
+            if (isPortrait) {
+                binding.chatLayout.visibility = View.GONE
+            } else {
+                hideChatLayout()
+            }
+            useController = false
+        }
+    }
+
+    override fun initialize() {
+        if (!started && playbackService?.started == true) {
+            started = true
+            start()
+        }
+    }
+
+    override fun onConfigurationChanged(newConfig: Configuration) {
+        super.onConfigurationChanged(newConfig)
+        with(binding) {
+            isPortrait = newConfig.orientation == Configuration.ORIENTATION_PORTRAIT
+            if (isMaximized) {
+                enableBackground()
+            } else {
+                disableBackground()
+            }
+            val isInPIPMode = when {
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.R -> requireActivity().isInPictureInPictureMode
+                Build.VERSION.SDK_INT >= Build.VERSION_CODES.O -> !useController && isMaximized
+                else -> false
+            }
+            if (!isInPIPMode) {
+                (requireContext().getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(chatLayout.windowToken, 0)
+                chatLayout.clearFocus()
+                initLayout()
+            }
+            (childFragmentManager.findFragmentByTag("closeOnPip") as? PlayerSettingsDialog?)?.dismiss()
+        }
+    }
+
+    override fun onPictureInPictureModeChanged(isInPictureInPictureMode: Boolean) {
+        with(binding) {
+            if (isInPictureInPictureMode) {
+                if (!isMaximized) {
+                    isMaximized = true
+                    requireActivity().onBackPressedDispatcher.addCallback(this@PlayerFragment, backPressedCallback)
+                    if (playbackService?.type == BasePlaybackService.STREAM && chatFragment?.emoteMenuIsVisible() == true) {
+                        chatFragment?.toggleBackPressedCallback(true)
+                    }
+                    slidingLayout.translationX = 0f
+                    slidingLayout.translationY = 0f
+                    slidingLayout.scaleX = 1f
+                    slidingLayout.scaleY = 1f
+                }
+                if (isPortrait) {
+                    chatLayout.visibility = View.GONE
+                } else {
+                    hideChatLayout()
+                }
+                useController = false
+                controllerAnimation?.cancel()
+                binding.playerControls.root.alpha = 0f
+                binding.playerControls.root.visibility = View.GONE
+                // player dialog
+                (childFragmentManager.findFragmentByTag("closeOnPip") as? BottomSheetDialogFragment)?.dismiss()
+                // player chat message dialog
+                (chatFragment?.childFragmentManager?.findFragmentByTag("messageDialog") as? BottomSheetDialogFragment)?.dismiss()
+                (chatFragment?.childFragmentManager?.findFragmentByTag("replyDialog") as? BottomSheetDialogFragment)?.dismiss()
+                (chatFragment?.childFragmentManager?.findFragmentByTag("imageDialog") as? BottomSheetDialogFragment)?.dismiss()
+            } else {
+                useController = true
+            }
+        }
+    }
+
+    override fun onStop() {
+        super.onStop()
+        binding.playerControls.root.removeCallbacks(controllerHideAction)
+    }
+
+    /** TV: what back does with the stream: "stop", "mini" (mini player) or "audio" (sound only). */
+    private fun tvLeaveAction(): String {
+        val prefs = requireContext().prefs()
+        return prefs.getString(C.TV_BACK_ACTION, null) ?: if (prefs.getBoolean(C.TV_BACK_MINIMIZES_PLAYER, false)) "mini" else "stop"
+    }
+
+    private var streamEndJob: kotlinx.coroutines.Job? = null
+
+    /**
+     * TV: the stream stopped (Twitch ended it). After a few seconds, unless a raid opens its stream or the stream came
+     * back, the player closes and the screen it was opened from is shown again.
+     */
+    protected fun onTvStreamEnded() {
+        if (view == null || !isAdded || !isTv || streamEndJob?.isActive == true) {
+            return
+        }
+        val activity = activity as? MainActivity ?: return
+        val login = activity.currentPlayingStream()?.channelLogin
+        // just back from a multi-stream: the next stream of it instead of closing
+        activity.takeMultiStreamFallback(login)?.let { next ->
+            activity.startStream(next, peekHud = true)
+            return
+        }
+        streamEndJob = viewLifecycleOwner.lifecycleScope.launch {
+            kotlinx.coroutines.delay(6000L)
+            // a raid announced in the chat: its stream comes, the player waits for it (30 s at most)
+            var waited = 0
+            while (chatFragment?.isRaidPending() == true && waited++ < 30) {
+                kotlinx.coroutines.delay(1000L)
+            }
+            if (view == null || activity.currentPlayingStream()?.channelLogin != login || isPlayingNow()) {
+                return@launch
+            }
+            close()
+            activity.closePlayer()
+        }
+    }
+
+    /** Leaves the player to browse (back, channel or category opened from the player). */
+    fun leaveForBrowsing() {
+        if (!isTv) {
+            minimize()
+            return
+        }
+        when (tvLeaveAction()) {
+            "mini" -> minimize()
+            "audio" -> {
+                minimize()
+                setTvAudioOnly(true)
+            }
+            else -> {
+                close()
+                (activity as? MainActivity)?.closePlayer()
+            }
+        }
+    }
+
+    private var tvAudioOnly = false
+
+    /**
+     * TV: leaving the app (Home, or Back on the first screen) keeps the sound of the mini player and of the sound only
+     * mode ("minimized"), and also of the full screen player ("always"), as chosen in the Xtra TV settings.
+     */
+    fun keepsPlayingWhenAppLeft(): Boolean {
+        if (!isTv || _binding == null || playbackService == null) {
+            return false
+        }
+        return when (requireContext().prefs().getString(C.TV_KEEP_SOUND_ON_LEAVE, "always")) {
+            "never" -> false
+            "minimized" -> !isMaximized
+            else -> true
+        }
+    }
+
+    /** TV audio only: the mini player is hidden and the picture is not decoded, the sound goes on. */
+    private fun setTvAudioOnly(enabled: Boolean) {
+        tvAudioOnly = enabled
+        _binding?.slidingLayout?.visibility = if (enabled) View.INVISIBLE else View.VISIBLE
+        setVideoHidden(enabled)
+        (activity as? MainActivity)?.updateTvNowPlaying()
+    }
+
+    open fun setVideoHidden(hidden: Boolean) {}
+
+    /** The stream of the player, for the "Now playing" entry of the side menu. */
+    fun getTvNowPlaying(): com.github.andreyasadchy.xtra.ui.tv.TvNowPlaying? {
+        val service = playbackService ?: return null
+        return com.github.andreyasadchy.xtra.ui.tv.TvNowPlaying(
+            channelName = service.channelName ?: service.channelLogin,
+            title = service.title,
+            image = service.thumbnail?.takeIf { it.isNotBlank() } ?: service.channelImage,
+            audioOnly = tvAudioOnly,
+        )
+    }
+
+    fun getPlayingStream(): Stream? {
+        val service = playbackService ?: return null
+        return Stream(
+            id = service.streamId,
+            channelId = service.channelId,
+            channelLogin = service.channelLogin,
+            channelName = service.channelName,
+            gameId = service.gameId,
+            gameSlug = service.gameSlug,
+            gameName = service.gameName,
+            title = service.title,
+            viewerCount = service.viewerCount,
+        )
+    }
+
+    fun minimize() {
+        with(binding) {
+            isMaximized = false
+            if (isTv) {
+                // the mini player is not reached with the D-pad, "Now playing" in the side menu brings it back
+                dragView.isFocusable = false
+                (activity as? MainActivity)?.updateTvNowPlaying()
+            }
+            if (playbackService?.type == BasePlaybackService.STREAM && chatFragment?.emoteMenuIsVisible() == true) {
+                chatFragment?.toggleBackPressedCallback(false)
+            }
+            backPressedCallback.remove()
+            minimizedBackPressedCallback.remove()
+            requireActivity().onBackPressedDispatcher.addCallback(this@PlayerFragment, minimizedBackPressedCallback)
+            useController = false
+            hideController(true)
+            dragView.setBackgroundResource(R.drawable.player_minimized_focus)
+            (activity as? MainActivity)?.setMainContentFocusable(true)
+            minimizedBackPressedCallback.isEnabled = dragView.hasFocus()
+            fun animate() {
+                val (minimizedScaleX, minimizedScaleY) = getScaleValues()
+                val windowInsets = ViewCompat.getRootWindowInsets(requireView())
+                val insets = windowInsets?.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.displayCutout())
+                val keyboardInsets = windowInsets?.getInsets(WindowInsetsCompat.Type.ime())?.bottom?.let { if (it > 0) it - (insets?.bottom ?: 0) else it } ?: 0
+                val scaledXDiff = (slidingLayout.width * (1f - minimizedScaleX)) / 2
+                val scaledYDiff = (slidingLayout.height * (1f - minimizedScaleY)) / 2
+                val navBarHeight = if (isTv) {
+                    resources.getDimensionPixelSize(R.dimen.tv_overscan_vertical)
+                } else {
+                    requireView().rootView.findViewById<LinearLayout>(R.id.navBarContainer)?.height?.takeIf { it > 0 }?.let { it - keyboardInsets } ?: (insets?.bottom ?: 0)
+                }
+                val playerWidth = if (isPortrait) {
+                    playerLayout.width
+                } else {
+                    slidingLayout.width - getHorizontalInsets(windowInsets)
+                }
+                val newX = slidingLayout.width - (insets?.right ?: 0) - (playerWidth * minimizedScaleX) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 20F, resources.displayMetrics) * minimizedScaleX)
+                val newY = slidingLayout.height - navBarHeight - (playerLayout.height * minimizedScaleY) - (TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, 30F, resources.displayMetrics) * minimizedScaleY)
+                slidingLayout.animate().apply {
+                    translationX(0f - scaledXDiff - ((insets?.left ?: 0) * minimizedScaleX) + newX)
+                    translationY(0f - scaledYDiff - ((insets?.top ?: 0) * minimizedScaleY) + newY)
+                    scaleX(minimizedScaleX)
+                    scaleY(minimizedScaleY)
+                    setDuration(250L)
+                    setListener(
+                        object : AnimatorListenerAdapter() {
+                            override fun onAnimationStart(animation: Animator) {
+                                isAnimating = true
+                                if (view != null) {
+                                    disableBackground()
+                                }
+                            }
+
+                            override fun onAnimationEnd(animation: Animator) {
+                                isAnimating = false
+                                setListener(null)
+                                activePointerId = -1
+                            }
+                        }
+                    )
+                    start()
+                }
+            }
+            if (isPortrait) {
+                chatLayout.visibility = View.GONE
+                slidingLayout.doOnLayout {
+                    animate()
+                }
+            } else {
+                showStatusBar()
+                hideChatLayout()
+                slidingLayout.doOnPreDraw {
+                    animate()
+                }
+                val activity = requireActivity()
+                activity.lifecycleScope.launch {
+                    delay(500.milliseconds)
+                    activity.requestedOrientation = ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED
+                }
+            }
+        }
+    }
+
+    fun maximize() {
+        with(binding) {
+            isMaximized = true
+            if (isTv) {
+                dragView.isFocusable = true
+                if (tvAudioOnly) {
+                    setTvAudioOnly(false)
+                }
+                (activity as? MainActivity)?.updateTvNowPlaying()
+            }
+            requireActivity().onBackPressedDispatcher.addCallback(this@PlayerFragment, backPressedCallback)
+            minimizedBackPressedCallback.remove()
+            minimizedBackPressedCallback.isEnabled = false
+            dragView.background = null
+            (activity as? MainActivity)?.setMainContentFocusable(false)
+            dragView.requestFocus()
+            if (playbackService?.type == BasePlaybackService.STREAM && chatFragment?.emoteMenuIsVisible() == true) {
+                chatFragment?.toggleBackPressedCallback(true)
+            }
+            useController = true
+            if (!controllerHideOnTouch) {
+                showController(force = true)
+                updateProgress()
+            }
+            if (isPortrait) {
+                chatLayout.visibility = View.VISIBLE
+            } else {
+                hideStatusBar()
+                if (isChatOpen) {
+                    showChatLayout()
+                }
+            }
+            slidingLayout.animate().apply {
+                translationX(0f)
+                translationY(0f)
+                scaleX(1f)
+                scaleY(1f)
+                setDuration(250L)
+                setListener(
+                    object : AnimatorListenerAdapter() {
+                        override fun onAnimationStart(animation: Animator) {
+                            isAnimating = true
+                        }
+
+                        override fun onAnimationEnd(animation: Animator) {
+                            isAnimating = false
+                            setListener(null)
+                            if (view != null) {
+                                enableBackground()
+                            }
+                            activePointerId = -1
+                        }
+                    }
+                )
+                start()
+            }
+        }
+    }
+
+    fun findUnlistedVideo() {
+        val unavailableQualities = getUnavailableQualities()
+        val qualities = if (unavailableQualities.isNotEmpty()) {
+            mutableListOf<VideoQuality>().apply {
+                playbackService?.qualities?.filter { !it.url.isNullOrBlank() }?.let { addAll(it) }
+                addAll(unavailableQualities)
+                sortWith(
+                    compareByDescending<VideoQuality> { it.bitrate }
+                        .thenByDescending { it.frameRate }
+                        .thenByDescending { it.resolution }
+                )
+                val audio = find { it.name?.startsWith("audio", true) == true }
+                audio?.let {
+                    remove(it)
+                    add(it)
+                }
+            }
+        } else {
+            playbackService?.qualities?.filter { !it.url.isNullOrBlank() }
+        }
+        viewModel.findUnlistedVideo(
+            requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+            qualities,
+            playbackService?.streamId,
+            playbackService?.channelLogin,
+            playbackService?.createdAt,
+        )
+    }
+
+
+
+    fun onSleepTimerChanged(durationMs: Long, hours: Int, minutes: Int, lockScreen: Boolean) {
+        if (durationMs > 0L) {
+            Toast.makeText(
+                requireContext(),
+                when {
+                    hours == 0 -> getString(
+                        R.string.playback_will_stop,
+                        resources.getQuantityString(R.plurals.minutes, minutes, minutes)
+                    )
+                    minutes == 0 -> getString(
+                        R.string.playback_will_stop,
+                        resources.getQuantityString(R.plurals.hours, hours, hours)
+                    )
+                    else -> getString(
+                        R.string.playback_will_stop_hours_minutes,
+                        resources.getQuantityString(R.plurals.hours, hours, hours),
+                        resources.getQuantityString(R.plurals.minutes, minutes, minutes)
+                    )
+                },
+                Toast.LENGTH_LONG
+            ).show()
+        } else if (((activity as? MainActivity)?.getSleepTimerTimeLeft() ?: 0) > 0L) {
+            Toast.makeText(requireContext(), R.string.timer_canceled, Toast.LENGTH_LONG).show()
+        }
+        if (lockScreen != requireContext().prefs().getBoolean(C.SLEEP_TIMER_LOCK, false)) {
+            requireContext().prefs().edit { putBoolean(C.SLEEP_TIMER_LOCK, lockScreen) }
+        }
+        (activity as? MainActivity)?.setSleepTimer(durationMs)
+    }
+
+    override fun onChange(requestCode: Int, index: Int, text: CharSequence, tag: String?, tag2: String?) {
+        when (requestCode) {
+            REQUEST_CODE_QUALITY -> {
+                changeQuality(playbackService?.qualities?.find { it.name == tag && it.url == tag2 })
+                changePlayerMode()
+                setQualityText()
+            }
+            REQUEST_CODE_SPEED -> {
+                requireContext().prefs().getString(C.PLAYER_SPEED_LIST, "0.25\n0.5\n0.75\n1.0\n1.25\n1.5\n1.75\n2.0\n3.0\n4.0\n8.0")?.split("\n")?.let { speeds ->
+                    speeds.getOrNull(index)?.toFloatOrNull()?.let { speed ->
+                        setPlaybackSpeed(speed)
+                        requireContext().prefs().edit { putFloat(C.PLAYER_SPEED, speed) }
+                        (childFragmentManager.findFragmentByTag("closeOnPip") as? PlayerSettingsDialog?)?.setSpeed(speed.toString())
+                    }
+                }
+            }
+        }
+    }
+
+    override fun onIntegrityTokenLoaded(callback: String?) {
+        when (callback) {
+            "refreshStream" -> {
+                retry(callback)
+                viewModel.isFollowingChannel(
+                    requireContext().tokenPrefs().getString(C.USER_ID, null),
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    requireContext().prefs().getString(C.UI_FOLLOW_BUTTON, "0")?.toIntOrNull() ?: 0,
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                    TwitchApiHelper.getHelixHeaders(requireContext()),
+                )
+            }
+            "refreshVideo" -> {
+                retry(callback)
+                val videoId = playbackService?.videoId
+                viewModel.isFollowingChannel(
+                    requireContext().tokenPrefs().getString(C.USER_ID, null),
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    requireContext().prefs().getString(C.UI_FOLLOW_BUTTON, "0")?.toIntOrNull() ?: 0,
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                    TwitchApiHelper.getHelixHeaders(requireContext()),
+                )
+                if (!videoId.isNullOrBlank() && (requireContext().prefs().getBoolean(C.PLAYER_GAMES_BUTTON, true) || requireContext().prefs().getBoolean(C.PLAYER_MENU_GAMES, false))) {
+                    viewModel.loadGamesList(
+                        videoId,
+                        requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                        TwitchApiHelper.getGQLHeaders(requireContext()),
+                        requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                    )
+                }
+            }
+            "refreshClip" -> {
+                retry(callback)
+                viewModel.isFollowingChannel(
+                    requireContext().tokenPrefs().getString(C.USER_ID, null),
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    requireContext().prefs().getString(C.UI_FOLLOW_BUTTON, "0")?.toIntOrNull() ?: 0,
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                    TwitchApiHelper.getHelixHeaders(requireContext()),
+                )
+            }
+            "follow" -> {
+                viewModel.saveFollowChannel(
+                    requireContext().tokenPrefs().getString(C.USER_ID, null),
+                    playbackService?.channelId,
+                    playbackService?.channelLogin,
+                    playbackService?.channelName,
+                    requireContext().prefs().getString(C.UI_FOLLOW_BUTTON, "0")?.toIntOrNull() ?: 0,
+                    requireContext().prefs().getBoolean(C.LIVE_NOTIFICATIONS_ENABLED, false),
+                    !requireContext().prefs().getBoolean(C.UI_ACTIVATE_NOTIFICATIONS_WHEN_FOLLOWING, true),
+                    playbackService?.createdAt,
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                    requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                )
+            }
+            "unfollow" -> {
+                viewModel.deleteFollowChannel(
+                    requireContext().tokenPrefs().getString(C.USER_ID, null),
+                    playbackService?.channelId,
+                    requireContext().prefs().getString(C.UI_FOLLOW_BUTTON, "0")?.toIntOrNull() ?: 0,
+                    requireContext().prefs().getString(C.NETWORK_LIBRARY, C.OKHTTP),
+                    TwitchApiHelper.getGQLHeaders(requireContext(), true),
+                    requireContext().prefs().getBoolean(C.ENABLE_INTEGRITY, false),
+                )
+            }
+        }
+    }
+
+    override fun onDestroyView() {
+        com.github.andreyasadchy.xtra.ui.tv.TvDim.removeListener(tvDimListener)
+        _binding?.root?.removeCallbacks(tvHudTicker)
+        _binding?.root?.viewTreeObserver?.takeIf { it.isAlive }?.removeOnGlobalFocusChangeListener(hudFocusListener)
+        if (isTv) {
+            activity?.window?.clearFlags(android.view.WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
+        }
+        resetFrameRateMatching()
+        seekPreview?.release()
+        seekPreview = null
+        tvStatsView = null
+        tvTopRightStack = null
+        tvAdblockView = null
+        (activity as? MainActivity)?.let {
+            if (it.playerFragment == null || it.playerFragment === this) {
+                it.setMainContentFocusable(true)
+            }
+        }
+        super.onDestroyView()
+        _binding = null
+    }
+
+    companion object {
+        private const val REQUEST_CODE_QUALITY = 0
+        private const val REQUEST_CODE_SPEED = 1
+        private const val REQUEST_CODE_AUDIO_ONLY = 2
+        private const val REQUEST_CODE_PLAY_PAUSE = 3
+        private const val REQUEST_CODE_CLOSE = 4
+        private const val LIVE_EDGE_MS = 20_000L
+        private const val DVR_CAUGHT_UP_MS = 10_000L
+        private const val LIVE_FIRST_STEP_MS = 60_000L
+        const val KEY_OFFLINE = "offline"
+        /** Set by the app when the player screen opens a live stream: known before its playback service is connected. */
+        const val KEY_STREAM = "tvStream"
+
+        /**
+         * TV: picture of the stream that is opening (the picture of its card, then the latest one of Twitch), shown in place
+         * of a black screen until the first picture of the video.
+         */
+        var pendingLoadingPicture: LoadingPicture? = null
+
+        /** TV: the next player screen comes from a switch of stream, it shows its HUD for a moment (without the focus). */
+        var peekHudOnStart = false
+
+        /** TV: last picture of the stream left by a switch of stream (left / right...), for a second or two. */
+        private var switchFrame: android.graphics.Bitmap? = null
+        private var switchFrameAt = 0L
+        /** The loading picture of the next stream waits for that picture (taken a little after the switch started). */
+        private var switchFrameListener: ((android.graphics.Bitmap) -> Unit)? = null
+
+        private fun takeSwitchFrame(): android.graphics.Bitmap? {
+            val frame = switchFrame?.takeIf { android.os.SystemClock.elapsedRealtime() - switchFrameAt < 3000L }
+            switchFrame = null
+            return frame
+        }
+
+        private fun putSwitchFrame(frame: android.graphics.Bitmap) {
+            val listener = switchFrameListener
+            if (listener != null) {
+                switchFrameListener = null
+                listener(frame)
+            } else {
+                switchFrame = frame
+                switchFrameAt = android.os.SystemClock.elapsedRealtime()
+            }
+        }
+
+        class LoadingPicture(val channelLogin: String?, val thumbnail: String?, val fallback: String?)
+
+        /** Button of the controls focused last (its id, else its description), kept from one player to the next. */
+        private var lastControlId = View.NO_ID
+        private var lastControlLabel: String? = null
+    }
+}

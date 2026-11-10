@@ -1,0 +1,47 @@
+name: Build separate APKs
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        abi: [armeabi-v7a, arm64-v8a, x86, x86_64]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-java@v6
+        with:
+          java-version: '21'
+          distribution: temurin
+      - uses: gradle/actions/setup-gradle@v6
+      - name: Test and build one ABI
+        env:
+          TARGET_ABI: ${{ matrix.abi }}
+        run: ./gradlew :app:testDebugUnitTest :app:assembleOptimized -PtargetAbi="$TARGET_ABI" --max-workers=2
+      - name: Verify and name APK
+        env:
+          TARGET_ABI: ${{ matrix.abi }}
+        run: |
+          version=$(sed -n 's/.*versionName = "\([^"]*\)".*/\1/p' app/build.gradle.kts)
+          mkdir -p dist
+          apk="dist/XtraTV-Reyohoho-mod-${version}-test-${TARGET_ABI}.apk"
+          cp app/build/outputs/apk/optimized/app-optimized.apk "$apk"
+          python3 .github/scripts/verify_apk.py "$apk" --abi "$TARGET_ABI" > "$apk.sha256"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: test-apk-${{ matrix.abi }}
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 14

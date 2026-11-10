@@ -1,0 +1,167 @@
+<androidx.preference.PreferenceScreen xmlns:android="http://schemas.android.com/apk/res/android"
+    xmlns:app="http://schemas.android.com/apk/res-auto">
+
+    <Preference
+        android:key="tv_1440p_warning"
+        android:layout="@layout/tv_preference_warning"
+        android:selectable="false"
+        android:title="@string/tv_1440p_warning"
+        app:isPreferenceVisible="@bool/isTv" />
+
+    <ListPreference
+        android:defaultValue="auto"
+        android:entries="@array/languageEntries"
+        android:entryValues="@array/language"
+        android:key="ui_language"
+        android:summary="%s"
+        android:title="@string/language"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="xtratv_settings"
+        android:summary="@string/xtratv_settings_summary"
+        android:title="@string/xtratv_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <SwitchPreferenceCompat
+        android:defaultValue="false"
+        android:key="ui_draw_behind_cutouts"
+        android:title="@string/draw_behind_cutouts"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <SwitchPreferenceCompat
+        android:defaultValue="false"
+        android:key="live_notifications_enabled"
+        android:title="@string/live_notifications"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="theme_settings"
+        android:title="@string/theme"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="ui_settings"
+        android:title="@string/ui_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="chat_settings"
+        android:title="@string/chat_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+
+
+    <SwitchPreferenceCompat
+        android:defaultValue="true"
+        android:key="player_background_audio"
+        android:title="@string/use_background_audio"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <SwitchPreferenceCompat
+        android:defaultValue="true"
+        android:key="player_background_audio_locked"
+        android:title="@string/use_background_audio_locked"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="player_settings"
+        android:title="@string/player_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="player_button_settings"
+        android:title="@string/player_buttons"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="buffer_settings"
+        android:title="@string/buffer_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <SwitchPreferenceCompat
+        android:defaultValue="true"
+        android:key="player_use_custom_proxy"
+        android:title="@string/use_custom_proxies"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="custom_proxy_settings"
+        android:title="@string/custom_proxy_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <SwitchPreferenceCompat
+        android:defaultValue="false"
+        android:key="player_use_stream_proxy"
+        android:title="@string/use_stream_proxies"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="stream_proxy_settings"
+        android:title="@string/proxy_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="playback_settings"
+        android:title="@string/playback_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="api_token_settings"
+        android:title="@string/api_token_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <ListPreference
+        android:defaultValue="OkHttp"
+        android:entries="@array/networkLibraryEntries"
+        android:entryValues="@array/networkLibraryEntries"
+        android:key="network_library"
+        android:summary="%s"
+        android:title="@string/network_library"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="backup_settings"
+        android:title="@string/backup_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="restore_settings"
+        android:title="@string/restore_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="debug_settings"
+        android:title="@string/debug_settings"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+    <Preference
+        android:key="about_app"
+        android:summary="XtraTV forked from https://github.com/crackededed/Xtra by razeN with AI"
+        android:title="@string/tv_settings_section_about"
+        app:iconSpaceReserved="false"
+        app:singleLineTitle="false" />
+
+</androidx.preference.PreferenceScreen>
