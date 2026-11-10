@@ -61,7 +61,6 @@ import androidx.compose.ui.focus.focusRestorer
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.graphicsLayer
-import androidx.compose.foundation.relocation.bringIntoViewRequester
 import androidx.compose.ui.input.key.Key
 import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.key
@@ -778,45 +777,21 @@ private fun GameRow(row: TvHomeRow<Game>, actions: TvHomeActions, firstRequester
     }
 }
 
-/** Focused card: the frame, and a real growth while its preview plays (the other cards move to make room). */
+/** Fixed-size Lite card: focus never starts a width animation or preview lifecycle. */
 @Composable
 private fun FocusCard(
     width: Dp,
     modifier: Modifier = Modifier,
     onClick: () -> Unit,
     onLongClick: (() -> Unit)? = null,
-    onFocus: (Boolean) -> Unit = {},
-    /** The preview of the card plays: it grows, its row gets taller and the next cards slide away. */
-    grown: () -> Boolean = { false },
-    /** Growth of a card with its preview: less with few big cards a row. */
-    growth: Float = 1f,
     content: @Composable (focused: androidx.compose.runtime.State<Boolean>) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
     val focused = interaction.collectIsFocusedAsState()
-    // the growth of the card can be turned off in the Xtra TV settings
-    val context = androidx.compose.ui.platform.LocalContext.current
-    val zoom = remember { context.prefs().getBoolean(C.TV_CARD_ZOOM, false) }
-    val big = zoom && growth > 1f && grown() && focused.value
-    val animatedWidth by androidx.compose.animation.core.animateDpAsState(
-        if (big) width * growth else width,
-        animationSpec = androidx.compose.animation.core.tween(320, easing = androidx.compose.animation.core.FastOutSlowInEasing),
-        label = "width"
-    )
-    // once grown, the whole card is brought on screen (it may go past the right edge)
-    val bringIntoView = remember { androidx.compose.foundation.relocation.BringIntoViewRequester() }
-    LaunchedEffect(big) {
-        if (big) {
-            kotlinx.coroutines.delay(340)
-            bringIntoView.bringIntoView()
-        }
-    }
     var longPressed by remember { mutableStateOf(false) }
     Column(
         modifier
-            .width(animatedWidth)
-            .bringIntoViewRequester(bringIntoView)
-            .onFocusChanged { onFocus(it.isFocused) }
+            .width(width)
             .onPreviewKeyEvent { event ->
                 // OK held down: actions of the card
                 val isSelect = event.key == Key.DirectionCenter || event.key == Key.Enter || event.key == Key.NumPadEnter
@@ -857,7 +832,7 @@ private fun Modifier.cardFocusOutline(focused: androidx.compose.runtime.State<Bo
             style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
         )
     }
-}
+}.graphicsLayer() // Retain the image and badges while only the outer focus outline is redrawn.
 
 @Composable
 private fun StreamCard(
@@ -885,14 +860,6 @@ private fun StreamCard(
         modifier = modifier,
         onClick = onClick,
         onLongClick = { actions.showActions(stream) },
-        onFocus = { if (it) actions.onStreamFocused(stream) else actions.onStreamUnfocused(stream) },
-        grown = { previewing && previewPlayer() != null },
-        // 2 cards a row: already big, they do not grow; 3: half bigger, 4 and more: twice as big
-        growth = when (actions.cardsPerRow.coerceIn(2, 6)) {
-            2 -> 1f
-            3 -> 1.5f
-            else -> 2f
-        },
     ) { focused ->
         Box(
             Modifier
@@ -911,7 +878,7 @@ private fun StreamCard(
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
-            val player = previewPlayer()
+            val player = if (com.github.andreyasadchy.xtra.util.TvLitePolicy.PREVIEWS) previewPlayer() else null
             if (previewing && player != null && focused.value) {
                 AndroidView(
                     factory = { context -> TextureView(context) },
