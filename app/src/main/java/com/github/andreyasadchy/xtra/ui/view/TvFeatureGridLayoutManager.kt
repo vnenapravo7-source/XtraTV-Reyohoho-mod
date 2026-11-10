@@ -305,6 +305,8 @@ class TvFeatureGridLayoutManager(
         val params = view.layoutParams as RecyclerView.LayoutParams
         val horizontal = insets.left + insets.right + params.leftMargin + params.rightMargin
         val cardWidth = max(width - horizontal, 0)
+        // Scrolling only changes coordinates. Re-measure on resize, rebinding or a child layout request.
+        if (view.measuredWidth == cardWidth && !view.isLayoutRequested) return
         if (view.measuredWidth != cardWidth) {
             // the card changes width: its layouts are measured again from scratch, the 16:9 thumbnail (ratio of a
             // ConstraintLayout) follows the new width instead of keeping the height measured before

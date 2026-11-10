@@ -9,23 +9,14 @@ import android.widget.TextView
  */
 object TvMarquee {
 
-    private const val START_DELAY = 1000L
-
+    // Lite TV: keep labels stable instead of starting delayed per-card animations.
+    @Suppress("UNUSED_PARAMETER")
     fun update(title: TextView, focused: Boolean) {
-        val start = title.getTag(com.github.andreyasadchy.xtra.R.id.tvMarqueeStart) as? Runnable
-            ?: Runnable {
-                if (title.layout?.getEllipsisCount(0)?.let { it > 0 } == true) {
-                    title.ellipsize = TextUtils.TruncateAt.MARQUEE
-                    title.marqueeRepeatLimit = -1
-                    title.isSelected = true
-                }
-            }.also { title.setTag(com.github.andreyasadchy.xtra.R.id.tvMarqueeStart, it) }
-        title.removeCallbacks(start)
-        if (focused) {
-            title.postDelayed(start, START_DELAY)
-        } else if (title.ellipsize != TextUtils.TruncateAt.END) {
-            title.isSelected = false
-            title.ellipsize = TextUtils.TruncateAt.END
+        (title.getTag(com.github.andreyasadchy.xtra.R.id.tvMarqueeStart) as? Runnable)?.let {
+            title.removeCallbacks(it)
+            title.setTag(com.github.andreyasadchy.xtra.R.id.tvMarqueeStart, null)
         }
+        if (title.isSelected) title.isSelected = false
+        if (title.ellipsize != TextUtils.TruncateAt.END) title.ellipsize = TextUtils.TruncateAt.END
     }
 }
