@@ -1579,10 +1579,9 @@ class ExoPlayerService : BasePlaybackService() {
         quality = selectedQuality
         player?.let { currentPlayer ->
             currentPlayer.trackSelectionParameters = currentPlayer.trackSelectionParameters.buildUpon()
-                .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(
-                    resources.getBoolean(R.bool.isTv), selectedQuality == null || selectedQuality.name == VideoQuality.AUTO_QUALITY, autoCapHeight
+                .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(selectedQuality == null || selectedQuality.name == VideoQuality.AUTO_QUALITY, autoCapHeight
                 ))
-                .setForceHighestSupportedBitrate(autoHighest && selectedQuality?.name == VideoQuality.AUTO_QUALITY)
+                .setForceHighestSupportedBitrate(autoHighest && (selectedQuality == null || selectedQuality.name == VideoQuality.AUTO_QUALITY))
                 .build()
         }
         quality?.let { quality ->
@@ -2578,12 +2577,11 @@ class ExoPlayerService : BasePlaybackService() {
 
     /** Keeps the quality of the backup player in line with the quality chosen for the main one. */
     private fun matchSecondaryQuality(secondaryPlayer: ExoPlayer) {
-        val height = quality?.takeIf { it.name != VideoQuality.AUTO_QUALITY }?.resolution
-            ?: player?.videoFormat?.height?.takeIf { it > 0 && quality?.name != VideoQuality.AUTO_QUALITY }
         val automatic = quality == null || quality?.name == VideoQuality.AUTO_QUALITY
+        val height = if (automatic) null else quality?.resolution
+            ?: player?.videoFormat?.height?.takeIf { it > 0 }
         secondaryPlayer.trackSelectionParameters = secondaryPlayer.trackSelectionParameters.buildUpon().apply {
-            setMaxVideoSize(Int.MAX_VALUE, height ?: com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(
-                resources.getBoolean(R.bool.isTv), automatic, autoCapHeight))
+            setMaxVideoSize(Int.MAX_VALUE, height ?: com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(automatic, autoCapHeight))
             setForceHighestSupportedBitrate(height != null || autoHighest)
         }.build()
     }
@@ -2597,7 +2595,7 @@ class ExoPlayerService : BasePlaybackService() {
     private var autoRaiseJob: Job? = null
 
     /**
-     * Non-TV Auto on Wi-Fi / Ethernet: the highest quality the device decodes. Twitch low latency sends the segments while they
+     * TV Auto and non-TV Auto on Wi-Fi / Ethernet: the highest quality the device decodes. Twitch low latency sends the segments while they
      * are made, so the measured bandwidth is the bitrate of the quality being played: the adaptive choice of the player
      * only goes down and never comes back up, it is not used. When the stream stops to buffer twice in a minute (after
      * playing for 10 s, a start or a switch of stream does not count), the quality goes down one step, and back up one
@@ -2644,7 +2642,7 @@ class ExoPlayerService : BasePlaybackService() {
         // back to the highest: no limit
         autoCapHeight = next?.takeIf { it != heights.first() }
         player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-            .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(resources.getBoolean(R.bool.isTv), true, autoCapHeight))
+            .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(true, autoCapHeight))
             .setForceHighestSupportedBitrate(true)
             .build()
         autoRaiseJob?.cancel()
@@ -2665,10 +2663,10 @@ class ExoPlayerService : BasePlaybackService() {
         autoCapHeight = null
         rebufferTimes.clear()
         playingSince = 0L
-        autoHighest = isUnmeteredNetwork() && !resources.getBoolean(R.bool.isTv)
+        autoHighest = com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.preferHighest(resources.getBoolean(R.bool.isTv), isUnmeteredNetwork())
         player?.let { player ->
             player.trackSelectionParameters = player.trackSelectionParameters.buildUpon()
-                .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(resources.getBoolean(R.bool.isTv), true))
+                .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(true))
                 .setForceHighestSupportedBitrate(autoHighest)
                 .build()
         }
@@ -2691,11 +2689,11 @@ class ExoPlayerService : BasePlaybackService() {
             0.85f
         )).apply {
             // no limit to the size of the screen: a 1440p stream (enhanced broadcasting) also looks better than 1080p on a 1080p TV
-            autoHighest = isUnmeteredNetwork() && !resources.getBoolean(R.bool.isTv)
+            autoHighest = com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.preferHighest(resources.getBoolean(R.bool.isTv), isUnmeteredNetwork())
             rebufferTimes.clear()
             playingSince = 0L
             parameters = buildUponParameters().clearViewportSizeConstraints()
-                .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(resources.getBoolean(R.bool.isTv), quality == null || quality?.name == VideoQuality.AUTO_QUALITY))
+                .setMaxVideoSize(Int.MAX_VALUE, com.github.andreyasadchy.xtra.util.TvAutoQualityPolicy.maxHeight(quality == null || quality?.name == VideoQuality.AUTO_QUALITY))
                 .setForceHighestSupportedBitrate(autoHighest).build()
         }
     }
