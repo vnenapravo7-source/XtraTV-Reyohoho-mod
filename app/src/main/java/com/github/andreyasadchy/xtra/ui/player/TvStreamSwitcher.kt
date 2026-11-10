@@ -211,7 +211,10 @@ object TvStreamSwitcher {
                 addView(tabsLayout)
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
+        val cardWidth = ((if (selection != null) 175 else 250) * density).toInt()
         val recyclerView = RecyclerView(activity).apply {
+            setItemViewCacheSize(4)
+            itemAnimator = null
             clipToPadding = false
             clipChildren = false
             setPadding(horizontalPadding, (8 * density).toInt(), horizontalPadding, (8 * density).toInt())
@@ -219,6 +222,12 @@ object TvStreamSwitcher {
         // card the focus goes to once it is shown (left / right pressed faster than the row scrolls)
         var pendingTarget = RecyclerView.NO_POSITION
         recyclerView.layoutManager = object : LinearLayoutManager(activity, LinearLayoutManager.HORIZONTAL, false) {
+            // This is a standalone horizontal list: keep two neighbours laid out on either side.
+            // initialPrefetchItemCount only helps when this RecyclerView is nested in another list.
+            override fun calculateExtraLayoutSpace(state: RecyclerView.State, extraLayoutSpace: IntArray) {
+                extraLayoutSpace[0] = cardWidth * 2
+                extraLayoutSpace[1] = cardWidth * 2
+            }
             // left / right stay in the row: the next card not shown yet, the row scrolls smoothly to it and the focus
             // follows when it is there (no jump, the tabs above are never reached); at the end the last card keeps it
             override fun onInterceptFocusSearch(focused: View, direction: Int): View? {
@@ -297,7 +306,7 @@ object TvStreamSwitcher {
             } else false
         }
         // multi-stream: smaller cards, more streams in sight
-        adapter = Adapter(streams, ((if (selection != null) 175 else 250) * density).toInt(), preview, checked) { stream ->
+        adapter = Adapter(streams, cardWidth, preview, checked) { stream ->
             if (selection != null && checked != null) {
                 val login = stream.channelLogin ?: return@Adapter
                 when {
@@ -637,8 +646,9 @@ object TvStreamSwitcher {
                 thumbnail.visibility = View.VISIBLE
                 context.imageLoader.enqueue(
                     ImageRequest.Builder(context).apply {
-                        data(com.github.andreyasadchy.xtra.ui.tv.TvThumbnails.picture(stream, stream.thumbnail))
-                        crossfade(true)
+                        data(com.github.andreyasadchy.xtra.ui.tv.TvThumbnails.picture(stream, stream.thumbnail?.replace("1280x720", "640x360")))
+                        size(itemWidth, (itemWidth * 9 / 16).coerceAtLeast(1))
+                        crossfade(false)
                         target(thumbnail)
                     }.build()
                 )
@@ -648,7 +658,8 @@ object TvStreamSwitcher {
                         ImageRequest.Builder(context).apply {
                             data(stream.channelImage)
                             transformations(CircleCropTransformation())
-                            crossfade(true)
+                            size((40 * context.resources.displayMetrics.density).toInt().coerceAtLeast(1))
+                            crossfade(false)
                             target(userImage)
                         }.build()
                     )

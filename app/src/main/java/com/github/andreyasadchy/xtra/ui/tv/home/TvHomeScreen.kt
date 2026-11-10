@@ -419,7 +419,7 @@ fun TvHomeScreen(
                     Box(Modifier.onFocusChanged { if (it.hasFocus) { focusedItem = rowIndex; bringRow(rowIndex) } }) {
                         StreamRow(
                             row, previewLogin, previewPlayer, actions, if (rowIndex == 0) firstCard else null,
-                            state = rowStates.getOrPut(key) { androidx.compose.foundation.lazy.LazyListState() },
+                            state = rowStates.getOrPut(key) { newTvStreamRowState() },
                             cardModifier = { stream ->
                                 val login = stream.channelLogin
                                 if (login != null) {
@@ -710,6 +710,12 @@ private fun Modifier.leftEdge(index: Int, openMenu: () -> Unit) = onPreviewKeyEv
     } else false
 }
 
+/** Keep roughly two adjacent cards ready without retaining the whole stream list. */
+@OptIn(ExperimentalFoundationApi::class)
+private fun newTvStreamRowState() = androidx.compose.foundation.lazy.LazyListState(
+    cacheWindow = androidx.compose.foundation.lazy.layout.LazyLayoutCacheWindow(aheadFraction = 0.5f, behindFraction = 0.5f)
+)
+
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun StreamRow(
@@ -718,7 +724,7 @@ private fun StreamRow(
     previewPlayer: () -> ExoPlayer?,
     actions: TvHomeActions,
     firstRequester: FocusRequester?,
-    state: androidx.compose.foundation.lazy.LazyListState = androidx.compose.foundation.lazy.rememberLazyListState(),
+    state: androidx.compose.foundation.lazy.LazyListState = remember { newTvStreamRowState() },
     cardModifier: (Stream) -> Modifier = { Modifier },
 ) {
     Column {
