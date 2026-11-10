@@ -12,7 +12,9 @@ class TextWithShadow : AppCompatTextView {
     constructor(context: Context, attrs: AttributeSet, defStyleAttr: Int) : super(context, attrs, defStyleAttr)
 
     override fun onDraw(canvas: Canvas) {
-        for (i in 0..6) {
+        // TV badges already have a contrasting background; draw their glyphs only once.
+        val passes = if (resources.getBoolean(com.github.andreyasadchy.xtra.R.bool.isTv)) 1 else 7
+        repeat(passes) {
             super.onDraw(canvas)
         }
     }

@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- TV player buttons: a white disc on the focused button, nothing on the others (Nuvio) -->
 <selector xmlns:android="http://schemas.android.com/apk/res/android"
-    android:exitFadeDuration="120"
-    android:enterFadeDuration="120">
+    android:exitFadeDuration="0"
+    android:enterFadeDuration="0">
     <item android:state_focused="true">
         <shape android:shape="oval">
             <solid android:color="#FFFFFFFF" />

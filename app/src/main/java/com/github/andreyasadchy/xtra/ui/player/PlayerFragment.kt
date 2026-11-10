@@ -2996,9 +2996,6 @@ abstract class PlayerFragment : BaseNetworkFragment(), RadioButtonDialogFragment
             // Nuvio style: the focused button is a white disc, its icon takes the color of accent (ambiance color)
             val focusedIcon = com.github.andreyasadchy.xtra.ui.tv.TvAccent.onLight
             buttons.forEach { button ->
-                // Small isolated layers keep selector fades from re-recording the HUD around each button.
-                // These layers belong to this view tree and are released when the player view is destroyed.
-                button.setLayerType(View.LAYER_TYPE_HARDWARE, null)
                 val previous = button.onFocusChangeListener
                 button.setOnFocusChangeListener { v, hasFocus ->
                     previous?.onFocusChange(v, hasFocus)
@@ -3081,9 +3078,9 @@ abstract class PlayerFragment : BaseNetworkFragment(), RadioButtonDialogFragment
         val x = anchorLocation[0] - rootLocation[0] + anchor.width / 2f - tooltip.measuredWidth / 2f
         tooltip.translationX = x.coerceIn(margin, (root.width - tooltip.measuredWidth - margin).coerceAtLeast(margin))
         tooltip.translationY = anchorLocation[1] - rootLocation[1] - tooltip.measuredHeight - margin
-        tooltip.alpha = 0f
+        tooltip.animate().cancel()
+        tooltip.alpha = 1f
         tooltip.visibility = View.VISIBLE
-        tooltip.animate().alpha(1f).setDuration(150L).start()
     }
 
     private fun hideTooltip() {
