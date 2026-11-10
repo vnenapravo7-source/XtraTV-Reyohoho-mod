@@ -1,5 +1,6 @@
 package com.github.andreyasadchy.xtra.ui.tv.home
 
+import androidx.compose.foundation.gestures.animateScrollBy
 import com.github.andreyasadchy.xtra.util.C
 import com.github.andreyasadchy.xtra.util.prefs
 import android.view.TextureView
@@ -120,6 +121,11 @@ class TvHomeActions(
     val uptime: (com.github.andreyasadchy.xtra.model.ui.Stream) -> String? = { null },
 )
 
+private class HomeRowScroll {
+    var index = -1
+    var job: kotlinx.coroutines.Job? = null
+}
+
 class TvHomeRow<T>(val title: String, val items: List<T>, val seeAllId: Int, val icon: Int? = null)
 
 /**
@@ -128,6 +134,7 @@ class TvHomeRow<T>(val title: String, val items: List<T>, val seeAllId: Int, val
  */
 @OptIn(ExperimentalFoundationApi::class)
 private val PivotSpec = object : BringIntoViewSpec {
+    override val scrollAnimationSpec = androidx.compose.animation.core.tween<Float>(140)
     override fun calculateScrollDistance(offset: Float, size: Float, containerSize: Float): Float {
         val peek = containerSize * 0.12f
         val end = offset + size
@@ -170,11 +177,28 @@ fun TvHomeScreen(
     val firstCard = remember { FocusRequester() }
     val peek = with(LocalDensity.current) { 56.dp.roundToPx() }
     // a row with the focus glides to the top, with the end of the row above still in sight (Google TV)
+    val rowScroll = remember { HomeRowScroll() }
     val bringRow: (Int) -> Unit = { index ->
-        scope.launch {
-            listState.animateScrollToItem(index, if (index <= 0) 0 else -peek)
+        val targetOffset = if (index <= 0) 0 else peek
+        val item = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+        if (rowScroll.index != index) {
+            rowScroll.job?.cancel()
+            rowScroll.job = null
+            rowScroll.index = index
+        }
+        if (rowScroll.job?.isActive != true &&
+            (item == null || kotlin.math.abs(item.offset - targetOffset) > 1)) {
+            rowScroll.job = scope.launch {
+                val visible = listState.layoutInfo.visibleItemsInfo.firstOrNull { it.index == index }
+                if (visible != null) {
+                    listState.animateScrollBy((visible.offset - targetOffset).toFloat(), androidx.compose.animation.core.tween(140))
+                } else {
+                    listState.scrollToItem(index, -targetOffset)
+                }
+            }
         }
     }
+
     val rows = listOfNotNull(
         followed?.takeIf { it.items.isNotEmpty() }?.let { "followed" to it },
         popular?.takeIf { it.items.isNotEmpty() }?.let { "popular" to it },
@@ -766,14 +790,14 @@ private fun FocusCard(
     grown: () -> Boolean = { false },
     /** Growth of a card with its preview: less with few big cards a row. */
     growth: Float = 1f,
-    content: @Composable (focused: Boolean) -> Unit,
+    content: @Composable (focused: androidx.compose.runtime.State<Boolean>) -> Unit,
 ) {
     val interaction = remember { MutableInteractionSource() }
-    val focused by interaction.collectIsFocusedAsState()
+    val focused = interaction.collectIsFocusedAsState()
     // the growth of the card can be turned off in the Xtra TV settings
     val context = androidx.compose.ui.platform.LocalContext.current
     val zoom = remember { context.prefs().getBoolean(C.TV_CARD_ZOOM, false) }
-    val big = zoom && focused && growth > 1f && grown()
+    val big = zoom && growth > 1f && grown() && focused.value
     val animatedWidth by androidx.compose.animation.core.animateDpAsState(
         if (big) width * growth else width,
         animationSpec = androidx.compose.animation.core.tween(320, easing = androidx.compose.animation.core.FastOutSlowInEasing),
@@ -818,6 +842,23 @@ private fun FocusCard(
 }
 
 
+
+/** Draw-only focus: changing the outline does not recompose/re-measure the card's text or image. */
+private fun Modifier.cardFocusOutline(focused: androidx.compose.runtime.State<Boolean>): Modifier = drawWithContent {
+    drawContent()
+    if (focused.value) {
+        val stroke = 3.dp.toPx()
+        val inset = stroke / 2
+        drawRoundRect(
+            color = Color.White,
+            topLeft = androidx.compose.ui.geometry.Offset(inset, inset),
+            size = androidx.compose.ui.geometry.Size((size.width - stroke).coerceAtLeast(0f), (size.height - stroke).coerceAtLeast(0f)),
+            cornerRadius = androidx.compose.ui.geometry.CornerRadius((10.dp.toPx() - inset).coerceAtLeast(0f)),
+            style = androidx.compose.ui.graphics.drawscope.Stroke(stroke),
+        )
+    }
+}
+
 @Composable
 private fun StreamCard(
     width: Dp,
@@ -832,6 +873,13 @@ private fun StreamCard(
     val small = width < 230.dp
     // only the card that shows the preview recomposes when the preview changes
     val previewing by remember(stream.channelLogin) { derivedStateOf { stream.channelLogin != null && previewLogin() == stream.channelLogin } }
+    val refreshStamp = actions.thumbnailStamp()
+    val thumbnail = remember(stream.channelLogin, stream.thumbnail, stream.channelImage, stream.createdAt, refreshStamp) {
+        com.github.andreyasadchy.xtra.ui.tv.TvThumbnails.remember(stream)
+        com.github.andreyasadchy.xtra.ui.tv.TvThumbnails.withStamp(
+            stream.thumbnail?.replace("1280x720", "640x360"), refreshStamp
+        )
+    }
     FocusCard(
         width = width,
         modifier = modifier,
@@ -853,18 +901,18 @@ private fun StreamCard(
                 // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
-                .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+                .cardFocusOutline(focused)
         ) {
             AsyncImage(
                 // smaller thumbnails than the 1280x720 of the lists, the cards are small
-                // the minute is in the address (TvThumbnails): the newest thumbnail of Twitch, loaded again each minute
-                model = com.github.andreyasadchy.xtra.ui.tv.TvThumbnails.picture(stream, stream.thumbnail?.replace("1280x720", "640x360")),
+                // Focus changes must not create a new image request at the minute boundary.
+                model = thumbnail,
                 contentDescription = null,
                 contentScale = ContentScale.Crop,
                 modifier = Modifier.fillMaxSize()
             )
             val player = previewPlayer()
-            if (previewing && player != null && focused) {
+            if (previewing && player != null && focused.value) {
                 AndroidView(
                     factory = { context -> TextureView(context) },
                     update = { player.setVideoTextureView(it) },
@@ -967,7 +1015,7 @@ private fun StreamCard(
                     fontSize = if (small) 11.sp else 13.sp,
                     color = TvColors.secondaryText,
                     maxLines = 1,
-                    overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier,
                 )
                 if (!stream.gameName.isNullOrBlank()) {
@@ -976,7 +1024,7 @@ private fun StreamCard(
                         fontSize = if (small) 11.sp else 12.sp,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
-                        overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier,
                     )
                 }
@@ -1094,7 +1142,7 @@ private fun FollowedVideoCard(width: Dp, video: com.github.andreyasadchy.xtra.mo
                 // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
-                .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+                .cardFocusOutline(focused)
         ) {
             VideoThumbnail(video.thumbnail, video.channelImage)
             val seconds = video.durationSeconds ?: 0
@@ -1120,7 +1168,7 @@ private fun FollowedVideoCard(width: Dp, video: com.github.andreyasadchy.xtra.mo
             fontWeight = FontWeight.SemiBold,
             color = Color.White,
             maxLines = 1,
-            overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier,
         )
         Text(
@@ -1149,7 +1197,7 @@ private fun ResumeCard(width: Dp, item: com.github.andreyasadchy.xtra.ui.tv.TvRe
                 // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
-                .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+                .cardFocusOutline(focused)
         ) {
             VideoThumbnail(item.thumbnail, item.channelImage)
             // time left, like the cards of Google TV
@@ -1202,7 +1250,7 @@ private fun ResumeCard(width: Dp, item: com.github.andreyasadchy.xtra.ui.tv.TvRe
                     fontWeight = FontWeight.SemiBold,
                     color = Color.White,
                     maxLines = 1,
-                    overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
+                    overflow = TextOverflow.Ellipsis,
                     modifier = Modifier,
                 )
                 Text(item.channelName ?: item.channelLogin ?: "", fontSize = if (small) 11.sp else 13.sp, color = TvColors.secondaryText, maxLines = 1, overflow = TextOverflow.Ellipsis)
@@ -1212,7 +1260,7 @@ private fun ResumeCard(width: Dp, item: com.github.andreyasadchy.xtra.ui.tv.TvRe
                         fontSize = if (small) 11.sp else 12.sp,
                         color = MaterialTheme.colorScheme.primary,
                         maxLines = 1,
-                        overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
+                        overflow = TextOverflow.Ellipsis,
                         modifier = Modifier,
                     )
                 }
@@ -1283,7 +1331,7 @@ private fun GameCard(game: Game, actions: TvHomeActions, modifier: Modifier) {
                 // Keep the high-contrast border without the costly focus shadow on TV GPUs.
                 .clip(RoundedCornerShape(10.dp))
                 .background(Color(0xFF26252C))
-                .then(if (focused) Modifier.border(3.dp, Color.White, RoundedCornerShape(10.dp)) else Modifier)
+                .cardFocusOutline(focused)
         ) {
             AsyncImage(
                 model = game.boxArt,
@@ -1300,7 +1348,7 @@ private fun GameCard(game: Game, actions: TvHomeActions, modifier: Modifier) {
             fontWeight = FontWeight.SemiBold,
             color = Color.White,
             maxLines = 1,
-            overflow = if (focused) TextOverflow.Clip else TextOverflow.Ellipsis,
+            overflow = TextOverflow.Ellipsis,
             modifier = Modifier,
         )
         game.viewerCount?.let {
@@ -1317,14 +1365,14 @@ private fun SeeAllCard(width: Dp, aspect: Float, onClick: () -> Unit) {
                 .fillMaxWidth()
                 .aspectRatio(aspect)
                 .clip(RoundedCornerShape(10.dp))
-                .background(if (focused) TvColors.focused else Color(0x1FFFFFFF)),
+                .background(if (focused.value) TvColors.focused else Color(0x1FFFFFFF)),
             contentAlignment = Alignment.Center
         ) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 Icon(
                     painterResource(R.drawable.tv_arrow_forward),
                     contentDescription = null,
-                    tint = if (focused) TvColors.onFocused else Color.White,
+                    tint = if (focused.value) TvColors.onFocused else Color.White,
                     modifier = Modifier.size(32.dp)
                 )
                 Spacer(Modifier.height(6.dp))
@@ -1332,7 +1380,7 @@ private fun SeeAllCard(width: Dp, aspect: Float, onClick: () -> Unit) {
                     androidx.compose.ui.platform.LocalContext.current.getString(R.string.tv_see_all),
                     fontSize = 14.sp,
                     fontWeight = FontWeight.SemiBold,
-                    color = if (focused) TvColors.onFocused else Color.White
+                    color = if (focused.value) TvColors.onFocused else Color.White
                 )
             }
         }

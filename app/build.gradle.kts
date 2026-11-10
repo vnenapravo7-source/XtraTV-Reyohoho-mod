@@ -42,8 +42,8 @@ android {
         applicationId = "com.github.razenfr.xtratv.reyohoho"
         minSdk = 24
         targetSdk = 37
-        versionCode = 150
-        versionName = "1.2.13-reyohoho.9-lite"
+        versionCode = 151
+        versionName = "1.2.13-reyohoho.10-lite"
     }
 
     buildTypes {
