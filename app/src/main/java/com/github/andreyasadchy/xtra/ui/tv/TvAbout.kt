@@ -33,8 +33,10 @@ import com.github.andreyasadchy.xtra.R
  */
 object TvAbout {
 
+    const val DISPLAY_NAME = "XtraTV mod"
+    const val FEATURE_TEXT = "Twitch · 1080–1440p · Adblock"
     const val CREDIT_TEXT = "XtraTV forked from https://github.com/crackededed/Xtra by razeN with AI"
-    const val GITHUB_URL = "https://github.com/razeNFR/XtraATV"
+    const val GITHUB_URL = "https://github.com/vnenapravo7-source/XtraTV-Reyohoho-mod"
 
     fun deviceSummary(): String {
         val manufacturer = Build.MANUFACTURER.replaceFirstChar { if (it.isLowerCase()) it.titlecase() else it.toString() }
@@ -45,7 +47,7 @@ object TvAbout {
 
     fun show(context: Context) {
         val qrBitmap = QrCode.encode(GITHUB_URL, 520)
-        val versionTitle = "${context.getString(R.string.app_name)} ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+        val versionTitle = "${DISPLAY_NAME} ${BuildConfig.VERSION_NAME.substringBefore("-")} (${BuildConfig.VERSION_CODE})"
         val deviceInfo = deviceSummary()
         TvDialogs.show(context) { dismiss ->
             SidePanel(title = context.getString(R.string.tv_settings_section_about)) {
@@ -59,7 +61,7 @@ object TvAbout {
                     )
                     Spacer(Modifier.height(6.dp))
                     Text(
-                        CREDIT_TEXT,
+                        FEATURE_TEXT + "\n" + CREDIT_TEXT,
                         fontSize = 14.sp,
                         color = TvColors.secondaryText,
                     )

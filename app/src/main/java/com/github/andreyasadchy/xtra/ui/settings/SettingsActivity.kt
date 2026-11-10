@@ -871,9 +871,9 @@ class SettingsActivity : AppCompatActivity() {
             }
             findPreference<Preference>("about_app")?.apply {
                 if (tvXml != 0) {
-                    title = "${getString(R.string.app_name)} ${BuildConfig.VERSION_NAME} (${BuildConfig.VERSION_CODE})"
+                    title = "${com.github.andreyasadchy.xtra.ui.tv.TvAbout.DISPLAY_NAME} ${BuildConfig.VERSION_NAME.substringBefore("-")} (${BuildConfig.VERSION_CODE})"
                 }
-                summary = com.github.andreyasadchy.xtra.ui.tv.TvAbout.CREDIT_TEXT
+                summary = com.github.andreyasadchy.xtra.ui.tv.TvAbout.FEATURE_TEXT + "\n" + com.github.andreyasadchy.xtra.ui.tv.TvAbout.CREDIT_TEXT
                 setOnPreferenceClickListener {
                     com.github.andreyasadchy.xtra.ui.tv.TvAbout.show(requireContext())
                     true

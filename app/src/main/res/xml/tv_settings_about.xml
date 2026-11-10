@@ -5,14 +5,14 @@
 
     <Preference
         android:key="about_app"
-        android:summary="XtraTV forked from https://github.com/crackededed/Xtra by razeN with AI"
-        android:title="@string/app_name"
+        android:summary="Twitch · 1080–1440p · Adblock"
+        android:title="XtraTV mod"
         app:iconSpaceReserved="false"
         app:singleLineTitle="false" />
 
     <Preference
         android:key="about_github"
-        android:summary="https://github.com/razeNFR/XtraATV"
+        android:summary="https://github.com/vnenapravo7-source/XtraTV-Reyohoho-mod"
         android:title="@string/tv_about_github"
         app:iconSpaceReserved="false"
         app:singleLineTitle="false" />

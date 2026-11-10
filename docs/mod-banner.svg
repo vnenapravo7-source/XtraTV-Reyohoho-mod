@@ -1,7 +1,7 @@
 <svg xmlns="http://www.w3.org/2000/svg" width="1200" height="300" viewBox="0 0 1200 300" role="img" aria-labelledby="title desc">
-<title id="title">XtraTV Reyohoho mod</title><desc id="desc">Twitch для Android TV. 1080p, adblock, лёгкий интерфейс.</desc>
+<title id="title">XtraTV Reyohoho mod</title><desc id="desc">Twitch для Android TV. 1080–1440p, adblock, лёгкий интерфейс.</desc>
 <defs><linearGradient id="bg" x2="1" y2="1"><stop stop-color="#101019"/><stop offset="1" stop-color="#29203f"/></linearGradient><linearGradient id="accent" x2="1" y2="1"><stop stop-color="#bf99ff"/><stop offset="1" stop-color="#9146ff"/></linearGradient></defs>
 <rect width="1200" height="300" rx="24" fill="url(#bg)"/><path d="M960 0h240v300H790Z" fill="#9146ff" opacity=".1"/>
 <rect x="66" y="76" width="164" height="116" rx="25" fill="none" stroke="url(#accent)" stroke-width="8"/><path d="M118 220h60m-30-24v24" stroke="#bd96ff" stroke-width="8" stroke-linecap="round"/><path d="m132 111 38 23-38 23Z" fill="#f5f0ff"/>
 <text x="278" y="105" fill="#bc99ff" font-family="Arial,sans-serif" font-size="17" font-weight="700" letter-spacing="3">TWITCH · ANDROID TV · GOOGLE TV</text>
-<text x="275" y="170" fill="#faf8ff" font-family="Arial,sans-serif" font-size="49" font-weight="700">XtraTV Reyohoho mod</text><text x="278" y="218" fill="#c7bfd6" font-family="Arial,sans-serif" font-size="22">1080p · Adblock · Лёгкий интерфейс</text></svg>
+<text x="275" y="170" fill="#faf8ff" font-family="Arial,sans-serif" font-size="49" font-weight="700">XtraTV Reyohoho mod</text><text x="278" y="218" fill="#c7bfd6" font-family="Arial,sans-serif" font-size="22">1080–1440p · Adblock · Лёгкий интерфейс</text></svg>
